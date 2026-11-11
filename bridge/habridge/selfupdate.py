@@ -12,7 +12,10 @@ Assistant; never automatic):
 
 The new version confirms itself after it has stayed connected for a minute.
 If it can't, guard.py (run by systemd before every start) puts the previous
-release back after three failed starts, and the old version reports that.
+release back after three failed starts in one boot, and the old version reports
+that. Every file is on disk before the switch, so a host that loses power in
+the middle (a Raspberry Pi on a smart plug) comes back on the old release or
+the new one, never half of each.
 """
 
 import hashlib
@@ -31,7 +34,7 @@ import urllib.request
 
 from . import PROJECT, VERSION
 from .core import Plugin
-from .util import now_iso, version_tuple, write_json_atomic
+from .util import fsync_dir, now_iso, version_tuple, write_json_atomic
 
 log = logging.getLogger("habridge.selfupdate")
 
@@ -40,6 +43,7 @@ DEFAULT_API = "https://api.github.com"
 PRESS_PAYLOAD = "INSTALL"
 OBJECT_ID = "bridge-update"  # slugs never contain '-', so no Compose key can collide
 KEEP_RELEASES = 3
+RETRY_SECONDS = 600  # after a failed check (no network or clock yet just after boot)
 
 
 def install_root():
@@ -58,15 +62,22 @@ def _safe_extract(tar, dest, top):
             raise RuntimeError(f"unexpected path in release archive: {name}")
         if not (m.isfile() or m.isdir()):
             raise RuntimeError(f"unexpected entry type in release archive: {name}")
+    dirs = set()
     for m in tar.getmembers():
         target = os.path.join(dest, m.name)
         if m.isdir():
             os.makedirs(target, exist_ok=True)
+            dirs.add(target)
             continue
         os.makedirs(os.path.dirname(target), exist_ok=True)
+        dirs.add(os.path.dirname(target))
         with tar.extractfile(m) as src, open(target, "wb") as out:
             shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
         os.chmod(target, 0o755 if m.mode & 0o111 else 0o644)
+    for d in dirs:
+        fsync_dir(d)
 
 
 def render_unit(release_dir, name, root):
@@ -93,7 +104,7 @@ class SelfUpdatePlugin(Plugin):
         self.topic_cmd = f"{b.base}/{OBJECT_ID}/install"
         self.st = dict(b.state.get("selfupdate") or {})
         self.lock = threading.Lock()
-        self.busy = False
+        self.installing = False
         self.wake = threading.Event()
         self.marker = None
         self._read_marker()
@@ -102,6 +113,10 @@ class SelfUpdatePlugin(Plugin):
     def snapshot(self):
         with self.lock:
             return {"selfupdate": dict(self.st)}
+
+    def busy_reason(self):
+        with self.lock:
+            return "bridge update" if self.installing else None
 
     def _read_marker(self):
         """What the last self-update left behind: confirm it, or report its rollback."""
@@ -177,7 +192,7 @@ class SelfUpdatePlugin(Plugin):
             return
         with self.lock:
             st = dict(self.st)
-            busy = self.busy
+            busy = self.installing
         latest = st.get("latest_version") or VERSION
         if version_tuple(latest) <= version_tuple(VERSION):
             latest = VERSION
@@ -211,11 +226,20 @@ class SelfUpdatePlugin(Plugin):
         if payload != PRESS_PAYLOAD or not self.enabled:
             log.warning("Ignoring unexpected message on %s", topic)
             return True
+        other = next((p.busy_reason() for p in self.bridge.plugins if p is not self and p.busy_reason()), None)
+        if other:
+            # Restarting now would cut that short (and a host could be powered off after it).
+            log.info("Bridge update not started: %s is running", other)
+            with self.lock:
+                self.st["last_install"] = now_iso()
+                self.st["last_install_result"] = f"Not started: {other} is running; try again when it's done"
+            self.publish_state()
+            return True
         with self.lock:
-            if self.busy:
+            if self.installing:
                 log.info("Bridge update already running; ignored")
                 return True
-            self.busy = True
+            self.installing = True
         self.publish_state()
         threading.Thread(target=self.install, name="selfupdate-install", daemon=True).start()
         return True
@@ -236,6 +260,8 @@ class SelfUpdatePlugin(Plugin):
                                                          for a in j.get("assets") or []}}
 
     def check(self):
+        """Returns True when GitHub answered."""
+        ok = False
         try:
             rel = self.latest_release()
             newer = version_tuple(rel["version"]) > version_tuple(VERSION)
@@ -248,17 +274,21 @@ class SelfUpdatePlugin(Plugin):
                     "installed_url": f"https://github.com/{self.repo}/releases/tag/v{VERSION}",
                     "last_check": now_iso(), "last_check_result": "OK"})
             log.info("Bridge: installed %s, latest release %s", VERSION, rel["version"])
+            ok = True
         except Exception as e:  # noqa: BLE001
             with self.lock:
                 self.st.update({"last_check": now_iso(), "last_check_result": f"Check failed: {e}"})
             log.warning("Bridge update check failed: %s", e)
         self.bridge.save_state()
         self.publish_state()
+        return ok
 
     def check_loop(self):
         while not self.bridge.stop.is_set():
-            self.check()
-            self.wake.wait(self.interval)
+            ok = self.check()
+            # A host that was just switched on may not have its network or clock yet:
+            # try again soon rather than in six hours.
+            self.wake.wait(self.interval if ok else min(self.interval, RETRY_SECONDS))
             self.wake.clear()
 
     def start(self):
@@ -294,6 +324,9 @@ class SelfUpdatePlugin(Plugin):
                     raise RuntimeError(f"release {rel['tag']} lacks {tarname} or SHA256SUMS")
                 releases = os.path.join(self.root, "releases")
                 os.makedirs(releases, exist_ok=True)
+                for d in os.listdir(releases):  # left behind by a power cut mid-download
+                    if d.startswith(".incoming-"):
+                        shutil.rmtree(os.path.join(releases, d), ignore_errors=True)
                 with tempfile.TemporaryDirectory(prefix=".incoming-", dir=releases) as tmp:
                     # 1. Download and verify
                     note(f"Downloading {tarname}")
@@ -328,6 +361,7 @@ class SelfUpdatePlugin(Plugin):
                     if os.path.exists(final):
                         shutil.rmtree(final)
                     os.replace(new_dir, final)
+                    fsync_dir(releases)
                 # 5. Switch, keeping a way back
                 from_path = os.path.realpath(current)
                 write_json_atomic(marker_path(self.bridge.log_dir), {
@@ -338,9 +372,14 @@ class SelfUpdatePlugin(Plugin):
                     os.remove(link)
                 os.symlink(final, link)
                 os.replace(link, current)
+                fsync_dir(self.root)
                 note(f"current -> {final}")
-                shutil.copy2(os.path.join(final, "guard.py"), os.path.join(self.root, "guard.py.new"))
-                os.replace(os.path.join(self.root, "guard.py.new"), os.path.join(self.root, "guard.py"))
+                guard_new = os.path.join(self.root, "guard.py.new")
+                shutil.copy2(os.path.join(final, "guard.py"), guard_new)
+                with open(guard_new, "rb+") as g:
+                    os.fsync(g.fileno())
+                os.replace(guard_new, os.path.join(self.root, "guard.py"))
+                fsync_dir(self.root)
                 self._update_unit(final, note)
                 self._prune(releases, {final, from_path}, note)
                 result = f"Installed {ver}; restarting into it"
@@ -352,7 +391,7 @@ class SelfUpdatePlugin(Plugin):
             self.st["last_install"] = started
             self.st["last_install_result"] = result
             self.st["log_file"] = log_path
-            self.busy = restart  # stays "in progress" until the restart
+            self.installing = restart  # stays "in progress" until the restart
         self.bridge.save_state()
         self.publish_state()
         if restart:
@@ -394,7 +433,10 @@ class SelfUpdatePlugin(Plugin):
             return
         with open(path + ".new", "w") as f:
             f.write(want)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(path + ".new", path)
+        fsync_dir(unit_dir)
         note(f"Updated {path}")
         if shutil.which("systemctl") and not os.environ.get("HABRIDGE_UNIT_DIR"):
             subprocess.run(["systemctl", "daemon-reload"], timeout=60)

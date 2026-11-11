@@ -37,11 +37,12 @@ python3 -m unittest tests/test_units.py
 python3 tests/test_immich_monitor.py
 python3 tests/test_e2e_selfupdate.py
 python3 tests/test_e2e_compose.py
+python3 tests/test_e2e_apps.py
 python3 tools/privacy_check.py
 ```
 
 The e2e suites need `mosquitto`, `python3-paho-mqtt` and `python3-yaml`, and ports 18830,
-18831, 5055, 18283 and 18284. Run them one at a time; they start their own fakes. A change in
+18831, 18832, 5055, 18283, 18284 and 18285. Run them one at a time; they start their own fakes. A change in
 behaviour gets a scenario in the matching e2e suite.
 
 ## Releasing
@@ -66,5 +67,10 @@ behaviour gets a scenario in the matching e2e suite.
 - `bridge/` is exactly what ships: `bridge.py` (entry), `guard.py` (rollback, standard library
   only, runs before every start), `habridge/` (the package), `systemd/`, `apt-packages.txt`.
 - `habridge/core.py`: MQTT connection, device, availability, Check button, safety rules, state.
-- Plugins (`habridge/compose.py`, `immich.py`, `selfupdate.py`) subclass `core.Plugin`. A new
-  host type is a new plugin, enabled per host with the config `plugins` list.
+- Plugins (`habridge/compose.py`, `immich.py`, `jellyfin.py`, `foundry.py`, `anthias.py`,
+  `selfupdate.py`) subclass `core.Plugin`. A new host type is a new plugin, enabled per host with
+  the config `plugins` list. A plugin's `prepare()` finds what the host has without publishing
+  (so `--check-discovery` sees every entity), and `busy_reason()` says when a restart or
+  power-off would cut something short.
+- Some hosts lose power without warning (a Pi on a smart plug). Anything written that must
+  survive goes through `util.write_json_atomic` (fsync, then rename).

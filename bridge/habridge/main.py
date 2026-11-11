@@ -9,23 +9,34 @@ import signal
 import sys
 
 from . import VERSION, registry, util
-from .core import Bridge
+from .core import DISCOVERY_PREFIX, Bridge
 
 log = logging.getLogger("habridge")
 
 
-def build_plugins(bridge, cfg):
-    """Plugins come from config "plugins"; without it: compose, immich (when an
-    Immich API key is configured) and selfupdate."""
+def available_plugins():
+    from .anthias import AnthiasPlugin
     from .compose import ComposePlugin
+    from .foundry import FoundryPlugin
     from .immich import ImmichPlugin
+    from .jellyfin import JellyfinPlugin
     from .selfupdate import SelfUpdatePlugin
-    available = {"compose": ComposePlugin, "immich": ImmichPlugin, "selfupdate": SelfUpdatePlugin}
+    return {"compose": ComposePlugin, "immich": ImmichPlugin, "jellyfin": JellyfinPlugin,
+            "foundry": FoundryPlugin, "anthias": AnthiasPlugin, "selfupdate": SelfUpdatePlugin}
+
+
+def build_plugins(bridge, cfg):
+    """Plugins come from config "plugins"; without it: compose, plus immich,
+    jellyfin, foundry or anthias when the config has that section, and selfupdate."""
+    available = available_plugins()
     names = cfg.get("plugins")
     if names is None:
         names = ["compose"]
         if (cfg.get("immich") or {}).get("api_key"):
             names.append("immich")
+        for app in ("jellyfin", "foundry", "anthias"):
+            if cfg.get(app):
+                names.append(app)
     names = [n for n in names if n != "selfupdate"] + ["selfupdate"]  # always last, always present
     unknown = [n for n in names if n not in available]
     if unknown:
@@ -42,6 +53,9 @@ def parse_args(argv):
     ap.add_argument("--self-test", action="store_true", help="load the config and plugins, then exit")
     ap.add_argument("--print-keys", action="store_true",
                     help="print the Compose keys this version would publish, as JSON, then exit")
+    ap.add_argument("--check-discovery", action="store_true",
+                    help="compare the entities this version would publish with the ones the MQTT "
+                         "broker holds for this host now; exit 2 if any would disappear")
     ap.add_argument("--version", action="version", version=VERSION)
     a = ap.parse_args(argv)
     if not a.name or not re.fullmatch(r"[a-z][a-z0-9_]*", a.name):
@@ -70,6 +84,9 @@ def main(argv=None):
                           "unreadable_folders": sorted(failed)}))
         return 0
 
+    if a.check_discovery:
+        return check_discovery(cfg, a.name, config_path)
+
     if a.self_test:
         # Everything short of connecting: imports, config, plugin construction.
         import shutil
@@ -90,3 +107,102 @@ def main(argv=None):
     signal.signal(signal.SIGINT, b.shutdown)
     b.run()
     return b.exit_code
+
+
+def planned_discovery(cfg, name, config_path):
+    """{discovery topic: config} for every entity this version would publish on
+    this host, found without connecting (each plugin's prepare(), then discovery
+    into a capture instead of the broker)."""
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix=f"{name}-ha-check-")
+    planned = {}
+
+    def capture(topic, payload, retain=True, qos=0):
+        if topic.startswith(f"{DISCOVERY_PREFIX}/") and topic.endswith("/config") and payload not in ("", None):
+            planned[topic] = payload if isinstance(payload, dict) else json.loads(payload)
+
+    try:
+        b = Bridge(cfg, name, config_path, tmp)
+        b.plugins = build_plugins(b, cfg)
+        b.publish = capture
+        b.client.publish = lambda topic, payload=None, qos=0, retain=False: capture(topic, payload)
+        for p in b.plugins:
+            p.prepare()
+        b.publish_discovery()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return b, planned
+
+
+def check_discovery(cfg, name, config_path, wait=3.0):
+    import threading
+    import time
+
+    import paho.mqtt.client as mqtt
+    b, planned = planned_discovery(cfg, name, config_path)
+    nodes = sorted({t.split("/")[2] for t in planned})
+    m = cfg["mqtt"]
+    cid = f"{b.service}-check-{os.getpid()}"  # never the running service's client ID
+    if hasattr(mqtt, "CallbackAPIVersion"):
+        c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=cid)
+    else:
+        c = mqtt.Client(client_id=cid)
+    if m.get("username"):
+        c.username_pw_set(m["username"], m.get("password"))
+    held, subscribed = {}, threading.Event()
+
+    def on_connect(client, userdata, flags, rc, *args):
+        if rc == 0:
+            client.subscribe([(f"{DISCOVERY_PREFIX}/+/{n}/+/config", 0) for n in nodes])
+
+    def on_message(client, userdata, msg):
+        if msg.retain and msg.payload:
+            try:
+                held[msg.topic] = json.loads(msg.payload)
+            except ValueError:
+                held[msg.topic] = {}
+
+    c.on_connect = on_connect
+    c.on_subscribe = lambda *a: subscribed.set()
+    c.on_message = on_message
+    try:
+        c.connect(m["host"], int(m.get("port", 1883)), keepalive=30)
+    except Exception as e:  # noqa: BLE001
+        print(f"Couldn't reach the MQTT broker to check entities: {e}")
+        return 1
+    c.loop_start()
+    try:
+        if not subscribed.wait(10):
+            print("The MQTT broker didn't answer; entities couldn't be checked")
+            return 1
+        time.sleep(wait)  # retained messages arrive right after the subscription
+    finally:
+        c.loop_stop()
+        c.disconnect()
+
+    def ident(conf):
+        return conf.get("unique_id") or "?"
+
+    def device(conf):
+        d = conf.get("device") or conf.get("dev") or {}
+        ids = d.get("identifiers") or d.get("ids") or []
+        return sorted([ids] if isinstance(ids, str) else ids)
+
+    planned_ids = {ident(conf) for conf in planned.values()}
+    lost = sorted((t, ident(conf)) for t, conf in held.items()
+                  if t not in planned and ident(conf) not in planned_ids)
+    changed = sorted((t, ident(conf), ident(planned[t])) for t, conf in held.items()
+                     if t in planned and ident(conf) != ident(planned[t]))
+    moved = sorted((t, device(conf), device(planned[t])) for t, conf in held.items()
+                   if t in planned and device(conf) and device(conf) != device(planned[t]))
+    new = sorted(t for t in planned if t not in held)
+    kept = len(held) - len(lost) - len(changed)
+    print(f"{kept} existing entities keep their IDs; {len(new)} new")
+    for t, uid in lost:
+        print(f"  would disappear: {uid} ({t})")
+    for t, old, now in changed:
+        print(f"  would change unique ID: {old} -> {now} ({t})")
+    for t, old, now in moved:
+        print(f"  would move to another device: {', '.join(old)} -> {', '.join(now)} ({t})")
+    return 2 if lost or changed or moved else 0

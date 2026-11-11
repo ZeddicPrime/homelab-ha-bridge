@@ -1,10 +1,12 @@
 # homelab-ha-bridge
 
-One small Python service per homelab host that puts the host's Docker Compose
-services into Home Assistant over MQTT discovery: an update entity with an
-Install button, a running sensor, a power switch and a restart button for each
-service. The bridge updates itself the same way: new releases of this repo show
-up in Home Assistant as an update you install with a click.
+One small Python service per homelab host that puts the host into Home Assistant
+over MQTT discovery. For Docker Compose services: an update entity with an Install
+button, a running sensor, a power switch and a restart button for each service.
+Plugins add applications that run outside Docker or need more than that (Jellyfin,
+Foundry VTT, Anthias signage on a Raspberry Pi, Immich). The bridge updates itself
+the same way: new releases of this repo show up in Home Assistant as an update you
+install with a click.
 
 It runs as root on the host itself (a Proxmox LXC, a VM, a Raspberry Pi), not in
 Docker, and needs only Python 3.11+, `python3-paho-mqtt` (1.6 or 2.x) and
@@ -30,6 +32,34 @@ One device per host (`<name>` is the host name you give the installer, e.g. `med
 
 Versions come from the `org.opencontainers.image.version` label (or the image digest when
 there is none), and release notes link to that version's own GitHub release page.
+
+## Plugins
+
+Turned on per host with the config `plugins` list (or, without one, by the config having
+that plugin's section). Each describes how an application works, never how a particular
+install uses it: anything that varies is found at runtime or set in the host's config.
+
+| Plugin | For | Adds |
+| --- | --- | --- |
+| `compose` | Docker Compose services under the compose root | the entities above |
+| `immich` | Immich (with a `compose` group) | sign-ins, signed-in devices, library size, job queues |
+| `jellyfin` | Jellyfin installed as a package | server, streams and transcodes, library counts and scan, restart, GPU load, OS updates, and an update entity that runs the host's update command (e.g. a community script's `update`) |
+| `foundry` | Foundry VTT | a "Foundry VTT" device: server, world, players, logins (event), backups, core / game-system / module updates (optional module groups), launch world and return to setup |
+| `anthias` | Anthias on a Raspberry Pi | online, health (undervoltage, storage, CEC, Anthias web), CPU temperature, projector standby/wake, next clip, restart viewer, reboot, shut down, and a read-only Anthias update entity |
+| `selfupdate` | every host | the "Bridge" update entity |
+
+### Hosts that are switched off
+
+A Pi on the same smart plug as its display is off most of the time. The `anthias` plugin
+keeps health and history (and the Anthias update) at their last value while it's off, and
+shows **Online** off; only live values and buttons go unavailable. Shut down powers the Pi
+off cleanly before the plug is cut. Set `mqtt.keepalive` to 15 or so, so that a Pi that
+loses power without shutting down shows offline within about 20 seconds.
+
+The bridge's own update is made for this too: every file is on disk before it switches
+releases, a power cut at any point leaves the old release or the new one, and a power cut
+right after an update doesn't count as a failed start. A check that fails just after
+power-on (no network or clock yet) is retried ten minutes later.
 
 ## Rules it follows
 
@@ -61,9 +91,15 @@ bash homelab-ha-bridge-$VER/install.sh --name media --device-name "Media Host"
 The installer asks for the MQTT login the first time and writes `/etc/<name>-ha/config.json`
 (mode 600). After that, updates come from Home Assistant.
 
-Running it again (to repair or rebuild a host) keeps the existing config and state, and first
-checks that every existing entity keeps its ID: if one wouldn't, it stops and changes nothing
-(`--force` overrides).
+Running it again (to repair or rebuild a host), or running it where another program already
+publishes this host's entities, keeps the existing config and state and first compares with the
+MQTT broker: every entity Home Assistant has from this host must still be published with the same
+unique ID and device. If one wouldn't, it stops and changes nothing (`--force` overrides). You can
+run the same comparison yourself:
+
+```sh
+python3 -I homelab-ha-bridge-$VER/bridge/bridge.py --name media --check-discovery
+```
 
 ## How self-update works
 
@@ -72,9 +108,11 @@ checks that every existing entity keeps its ID: if one wouldn't, it stops and ch
    unpacks it next to the running release, installs any new apt packages it lists, and runs
    its self-test against the host's config. Any failure leaves everything as it was.
 3. It points `/opt/homelab-ha-bridge/current` at the new release and exits; systemd starts it again.
-4. The new version confirms itself after a minute connected. If it fails to start three times,
-   `guard.py` (run by systemd before every start) puts the previous release back, and that
-   version reports the failed update in Home Assistant.
+4. The new version confirms itself after a minute connected. If it fails to start three times in
+   one boot, `guard.py` (run by systemd before every start) puts the previous release back, and
+   that version reports the failed update in Home Assistant.
+5. A bridge update isn't started while a plugin is installing something (a Jellyfin update, a
+   Compose install), because the restart would cut it short.
 
 ```
 /opt/homelab-ha-bridge/
@@ -91,9 +129,11 @@ checks that every existing entity keeps its ID: if one wouldn't, it stops and ch
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `mqtt` | | `host`, `port` (1883), `username`, `password`, `client_id` (`<name>-ha`) |
+| `mqtt` | | `host`, `port` (1883), `username`, `password`, `client_id` (`<name>-ha`), `keepalive` (60) |
 | `compose_root` | `/opt/<name>` | Folder whose subfolders hold compose files |
 | `device_name`, `device_model` | `<Name> Host`, `Docker Compose host` | The Home Assistant device |
+| `device_id`, `device_manufacturer`, `device_url` | `<name>_lxc`, `Proxmox LXC`, none | More of the device (the `anthias` plugin defaults to `<name>_pi` and the Pi's model) |
+| `topic_base`, `availability_topic` | `<name>`, `<base>/availability` | Where this host's topics live, for entities that already exist under other topics |
 | `check_interval_hours` | 6 | Registry checks |
 | `status_interval_seconds` | 30 | Running / health polling |
 | `timeout_minutes`, `settle_seconds` | 15, 10 | Install limits; how long a new container must stay up |
@@ -104,7 +144,7 @@ checks that every existing entity keeps its ID: if one wouldn't, it stops and ch
 | `allow_prereleases` | `[]` | Keys (or group keys) that may be offered pre-releases |
 | `groups` | `{}` | `{"app": {"title": "...", "members": ["server", "worker"], "health_of": "server", "compose_check_url": ".../{version}/docker-compose.yml"}}` |
 | `db_dump` | none | For groups: `{"container": "...", "user": "postgres", "dir": "...", "keep": 3}` |
-| `plugins` | `["compose"]` | Add `"immich"` (with an `immich` section) for Immich sign-in, library and job entities |
+| `plugins` | `["compose"]` | See Plugins; each plugin's own settings go in a section named after it (`immich`, `jellyfin`, `foundry`, `anthias`), described at the top of its module in `bridge/habridge/` |
 | `self_update` | on | `{"enabled": false}` to turn it off; `check_interval_hours` |
 
 ## Development
@@ -114,12 +154,13 @@ sudo apt-get install mosquitto python3-paho-mqtt python3-yaml
 python3 -m unittest tests/test_units.py
 python3 tests/test_e2e_compose.py      # compose + groups + cloudflared + Immich, against fakes
 python3 tests/test_e2e_selfupdate.py   # self-update, checksum, rollback
+python3 tests/test_e2e_apps.py         # Jellyfin, Foundry VTT, Anthias, --check-discovery
 python3 tests/test_immich_monitor.py
 python3 tools/privacy_check.py         # nothing that identifies a particular home or network
 ```
 
 The tests need no Docker, registry or Home Assistant: `tests/fakes/` has a Docker CLI shim, an OCI
-registry, and fake GitHub and Immich APIs. See [CLAUDE.md](CLAUDE.md) for the release process.
+registry, and fake GitHub, Immich, Jellyfin, Foundry and Anthias APIs. See [CLAUDE.md](CLAUDE.md) for the release process.
 
 ## License
 

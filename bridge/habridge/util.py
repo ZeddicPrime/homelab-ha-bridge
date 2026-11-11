@@ -46,17 +46,36 @@ def redact(text):
     return re.sub(r"eyJ[A-Za-z0-9_.=+/-]{10,}", "<redacted>", str(text))
 
 
+def fsync_dir(path):
+    """Make a rename or new file in this folder survive a power cut."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def write_json_atomic(path, obj, mode=None):
     """Write JSON through a unique temp file in the same folder, then rename,
-    so two threads saving at once can't trip over a shared .tmp name."""
+    so two threads saving at once can't trip over a shared .tmp name. The data
+    reaches the disk before the rename, so a power cut leaves the old file or
+    the new one, never an empty one (some hosts lose power without warning)."""
     d = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=d)
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(obj, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
+        fsync_dir(d)
     except BaseException:
         try:
             os.unlink(tmp)

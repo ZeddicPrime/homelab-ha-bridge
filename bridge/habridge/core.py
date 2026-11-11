@@ -42,8 +42,17 @@ class Plugin:
         """Return True if the message was for this plugin."""
         return False
 
+    def prepare(self):
+        """Find out what this host has (folders, GPU, packages) without publishing,
+        so --check-discovery can list every entity this plugin will publish."""
+
     def publish_discovery(self):
         pass
+
+    def busy_reason(self):
+        """A short reason while this plugin runs something that a restart, reboot or
+        power-off would break (an install), else None."""
+        return None
 
     def republish(self):
         pass
@@ -62,13 +71,16 @@ class Plugin:
 
 
 def make_device(cfg, name, service):
-    return {
+    dev = {
         "identifiers": [cfg.get("device_id", f"{name}_lxc")],
         "name": cfg.get("device_name", f"{name.capitalize()} Host"),
         "manufacturer": cfg.get("device_manufacturer", "Proxmox LXC"),
         "model": cfg.get("device_model", "Docker Compose host"),
         "sw_version": f"{PROJECT} {VERSION}",
     }
+    if cfg.get("device_url"):
+        dev["configuration_url"] = cfg["device_url"]
+    return dev
 
 
 class Bridge:
@@ -77,8 +89,10 @@ class Bridge:
         self.name = name                        # drives every topic, ID and path
         self.service = f"{name}-ha"             # systemd unit, MQTT client ID
         self.node = f"{name}_ha"                # discovery node ID and unique_id prefix
-        self.base = name                        # topic prefix
-        self.avail_topic = f"{self.base}/availability"
+        # Topic prefix and last-will topic. Both can be set in the config for a host
+        # whose entities already live under other topics.
+        self.base = cfg.get("topic_base") or name
+        self.avail_topic = cfg.get("availability_topic") or f"{self.base}/availability"
         self.check_topic = f"{self.base}/check"
         self.config_path = config_path
         self.log_dir = log_dir
@@ -114,6 +128,20 @@ class Bridge:
                 return json.load(f)
         except Exception:  # noqa: BLE001
             return {}
+
+    def plugin(self, name):
+        return next((p for p in self.plugins if p.name == name), None)
+
+    def busy_reason(self):
+        """Why a restart, reboot or power-off would be harmful right now, else None."""
+        for p in self.plugins:
+            try:
+                why = p.busy_reason()
+            except Exception:  # noqa: BLE001
+                why = None
+            if why:
+                return why
+        return None
 
     def save_state(self):
         with self.save_lock:
@@ -219,10 +247,16 @@ class Bridge:
 
     # -------------------------------------------------------------- main
     def run(self):
+        for p in self.plugins:
+            try:
+                p.prepare()  # so the first discovery already has everything this host has
+            except Exception:  # noqa: BLE001
+                log.exception("%s: prepare failed", p.name)
         m = self.cfg["mqtt"]
         while not self.stop.is_set():
             try:
-                self.client.connect(m["host"], int(m.get("port", 1883)), keepalive=60)
+                # A shorter keepalive makes the broker notice a host that lost power sooner.
+                self.client.connect(m["host"], int(m.get("port", 1883)), keepalive=int(m.get("keepalive", 60)))
                 break
             except Exception as e:  # noqa: BLE001
                 log.warning("MQTT connect error (%s); retrying in 15s", e)

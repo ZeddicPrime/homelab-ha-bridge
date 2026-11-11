@@ -288,6 +288,13 @@ class ComposePlugin(Plugin):
     def save(self):
         self.b.save_state()
 
+    def prepare(self):
+        self.scan()
+
+    def busy_reason(self):
+        with self.lock:
+            return f"installing {', '.join(sorted(self.busy))}" if self.busy else None
+
     # -------------------------------------------------------------- mqtt
     def topics(self, key):
         b = f"{self.b.base}/{key}"

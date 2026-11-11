@@ -3,6 +3,29 @@
 Bridges show the section for a release as its release notes in Home Assistant, so the
 first lines of each section should say what changes for someone pressing Install.
 
+## 0.2.0
+
+New plugins for hosts that aren't plain Docker Compose hosts, and a bridge update that is
+safe on hosts that lose power. Nothing changes on existing hosts except the points below.
+
+- **Jellyfin plugin**: server, streams and transcodes, library counts and scan, restart,
+  GPU load, pending OS updates, and an update entity that runs the host's update command.
+- **Foundry VTT plugin**: a "Foundry VTT" device with server, world, players, login events,
+  backups, and core / game-system / module update checks (game systems are the ones your
+  worlds use; optional module groups), plus Launch world and Return to setup.
+- **Anthias plugin** for a Raspberry Pi that's switched off most of the time: health keeps
+  its last value while it's off, Online follows the last will, Shut down powers it off cleanly.
+- **Power-cut safe bridge updates**: every file is on disk before the switch, a power cut
+  right after an update no longer counts as a failed start, and a check that fails just
+  after power-on is retried in ten minutes instead of six hours.
+- **No bridge update while something else installs**: Install is refused (and says why)
+  while a Compose or Jellyfin install is running.
+- **Installer compares with the broker**: before replacing a service it checks that every
+  entity Home Assistant has from the host keeps its unique ID and device
+  (`bridge.py --check-discovery` runs the same check).
+- New config keys, all optional: `topic_base`, `availability_topic`, `device_id`,
+  `device_manufacturer`, `device_url`, `mqtt.keepalive`.
+
 ## 0.1.0
 
 First release.

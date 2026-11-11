@@ -32,3 +32,5 @@ jobs:
         run: /usr/bin/python3 tests/test_e2e_selfupdate.py
       - name: Compose end to end
         run: /usr/bin/python3 tests/test_e2e_compose.py
+      - name: Application plugins end to end
+        run: /usr/bin/python3 tests/test_e2e_apps.py

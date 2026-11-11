@@ -1,4 +1,5 @@
 """Fast checks of the pure helpers (no broker, no fakes). Run: python3 -m unittest tests/test_units.py"""
+import json
 import os
 import sys
 import unittest
@@ -104,6 +105,65 @@ class ComposeCheck(unittest.TestCase):
         new = {"ml": svc(self.T, environment={"NEW": "1"})}
         self.assertIn(("ml: new environment variable NEW", "missing"), compose_changes(None, new, {"ml": svc("x")}))
         self.assertEqual(compose_changes(None, new, {"ml": svc("x", environment={"NEW": "1"})}), [])
+
+
+class Guard(unittest.TestCase):
+    """guard.py counts failed starts per boot: a power cut is not a failed start."""
+
+    def setUp(self):
+        import tempfile
+        self.d = tempfile.mkdtemp()
+        os.makedirs(f"{self.d}/releases/old")
+        os.makedirs(f"{self.d}/releases/new")
+        os.symlink(f"{self.d}/releases/new", f"{self.d}/current")
+        self.marker = f"{self.d}/self-update.json"
+        with open(self.marker, "w") as f:
+            json.dump({"from_version": "1", "from_path": f"{self.d}/releases/old", "to_version": "2",
+                       "attempts": 0}, f)
+
+    def start(self, boot):
+        import subprocess
+        guard = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bridge", "guard.py")
+        subprocess.run([sys.executable, "-I", guard, "--name", "x", "--log-dir", self.d, "--root", self.d],
+                       env=dict(os.environ, HABRIDGE_BOOT_ID=boot), check=True, capture_output=True)
+        with open(self.marker) as f:
+            return json.load(f)
+
+    def test_three_failed_starts_in_one_boot_roll_back(self):
+        for _ in range(3):
+            self.assertFalse(self.start("a").get("rolled_back"))
+        m = self.start("a")
+        self.assertTrue(m.get("rolled_back"))
+        self.assertEqual(os.path.realpath(f"{self.d}/current"), os.path.realpath(f"{self.d}/releases/old"))
+
+    def test_power_cuts_do_not_count(self):
+        for boot in ("a", "b", "c", "d", "e"):  # started once per boot, then the power went
+            m = self.start(boot)
+            self.assertEqual(m["attempts"], 1)
+            self.assertFalse(m.get("rolled_back"))
+        self.assertEqual(os.path.realpath(f"{self.d}/current"), os.path.realpath(f"{self.d}/releases/new"))
+
+    def test_count_starts_again_after_a_reboot(self):
+        self.start("a"); self.start("a")
+        self.assertEqual(self.start("b")["attempts"], 1)
+
+
+class Busy(unittest.TestCase):
+    def test_bridge_reports_the_first_busy_plugin(self):
+        from habridge.core import Bridge, Plugin
+
+        class P(Plugin):
+            def __init__(self, why):
+                self.why = why
+
+            def busy_reason(self):
+                return self.why
+
+        b = Bridge.__new__(Bridge)
+        b.plugins = [P(None), P("Jellyfin update"), P("other")]
+        self.assertEqual(b.busy_reason(), "Jellyfin update")
+        b.plugins = [P(None)]
+        self.assertIsNone(b.busy_reason())
 
 
 if __name__ == "__main__":

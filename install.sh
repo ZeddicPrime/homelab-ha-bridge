@@ -106,11 +106,19 @@ chmod 0600 "$CFG"
 
 echo "==> Checking this release against the host"
 /usr/bin/python3 -I "$SRC/bridge.py" --name "$NAME" --config "$CFG" --log-dir "$LOGDIR" --self-test
-if [ -f "$UNIT" ] && ! grep -q "$ROOT/" "$UNIT" && [ ! -f "$LOGDIR/state.json" ]; then
-  # Another program already runs as this service and keeps no state this release can
-  # read, so its entities can't be checked: don't replace it.
-  echo "    $SVC already exists and isn't this bridge; its entities can't be checked (no $LOGDIR/state.json)."
-  [ "$FORCE" = 1 ] || { echo "    Nothing was changed. --force replaces it anyway."; exit 1; }
+if [ -f "$UNIT" ] || [ -f "$LOGDIR/state.json" ]; then
+  # Compare with what the MQTT broker holds for this host: every entity Home Assistant
+  # has from it must still be published, with the same unique ID and device.
+  RC=0
+  /usr/bin/python3 -I "$SRC/bridge.py" --name "$NAME" --config "$CFG" --log-dir "$LOGDIR" --check-discovery \
+    | sed 's/^/    /' || RC=${PIPESTATUS[0]}
+  if [ "$RC" = 2 ]; then
+    [ "$FORCE" = 1 ] || { echo "    Nothing was changed. Re-run with --force if that's expected."; exit 1; }
+  elif [ "$RC" != 0 ] && [ -f "$UNIT" ] && ! grep -q "$ROOT/" "$UNIT"; then
+    # Another program runs as this service and its entities couldn't be compared: keep it.
+    echo "    $SVC isn't this bridge and its entities couldn't be checked."
+    [ "$FORCE" = 1 ] || { echo "    Nothing was changed. --force replaces it anyway."; exit 1; }
+  fi
 fi
 if [ -f "$LOGDIR/state.json" ]; then
   KEYS=$(/usr/bin/python3 -I "$SRC/bridge.py" --name "$NAME" --config "$CFG" --print-keys)
