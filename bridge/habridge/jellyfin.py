@@ -166,7 +166,7 @@ class JellyfinAPI:
 
 # ------------------------------------------------------------------- helpers
 def run(cmd, timeout=60, env_path=SYS_PATH):
-    env = {"PATH": env_path, "LANG": "C.UTF-8", "HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
+    env = {"PATH": env_path, "LANG": "C.UTF-8", "HOME": os.path.expanduser("~"), "DEBIAN_FRONTEND": "noninteractive"}
     try:
         p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
                            text=True, timeout=timeout, env=env)
@@ -524,7 +524,8 @@ class JellyfinPlugin(Plugin):
         self.publish_update(in_progress=True)
 
         log_path = os.path.join(self.bridge.log_dir, "last-update.log")
-        env = {"PATH": self.env_path, "HOME": "/root", "LANG": "C.UTF-8",
+        home = os.path.expanduser("~")  # /root for the service; the updater runs from there
+        env = {"PATH": self.env_path, "HOME": home, "LANG": "C.UTF-8",
                "TERM": "xterm",  # community-script updaters call `clear`, which fails under "dumb"
                "PHS_SILENT": "1", "DEBIAN_FRONTEND": "noninteractive"}
         cmd = list(self.update_command)
@@ -534,7 +535,7 @@ class JellyfinPlugin(Plugin):
                 lf.write(f"# {self.bridge.service} {VERSION}: {' '.join(cmd)} at {started}\n")
                 lf.flush()
                 proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
-                                      env=env, cwd="/root" if os.path.isdir("/root") else None,
+                                      env=env, cwd=home if os.access(home, os.R_OK | os.X_OK) else None,
                                       timeout=self.timeout, start_new_session=True)
                 rc = proc.returncode
         except subprocess.TimeoutExpired:
