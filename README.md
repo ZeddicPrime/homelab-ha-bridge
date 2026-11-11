@@ -61,13 +61,9 @@ bash homelab-ha-bridge-$VER/install.sh --name media --device-name "Media Host"
 The installer asks for the MQTT login the first time and writes `/etc/<name>-ha/config.json`
 (mode 600). After that, updates come from Home Assistant.
 
-### Upgrading from a single-file `<name>-ha` bridge
-
-The same command upgrades a host that runs an older single-file bridge
-(`/opt/<name>-ha/<name>_ha.py`). It keeps the config and state, adds `--device-name` /
-`--device-model` only if the config has none, and first checks that every existing entity keeps
-its ID (it stops and changes nothing if one wouldn't; `--force` overrides). The old program
-stays where it was, and the installer prints the command to go back to it.
+Running it again (to repair or rebuild a host) keeps the existing config and state, and first
+checks that every existing entity keeps its ID: if one wouldn't, it stops and changes nothing
+(`--force` overrides).
 
 ## How self-update works
 

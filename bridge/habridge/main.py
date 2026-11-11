@@ -16,7 +16,7 @@ log = logging.getLogger("habridge")
 
 def build_plugins(bridge, cfg):
     """Plugins come from config "plugins"; without it: compose, immich (when an
-    Immich API key is configured) and selfupdate — what immich-ha 1.0.x did."""
+    Immich API key is configured) and selfupdate."""
     from .compose import ComposePlugin
     from .immich import ImmichPlugin
     from .selfupdate import SelfUpdatePlugin

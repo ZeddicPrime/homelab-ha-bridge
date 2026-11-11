@@ -5,9 +5,8 @@
 #
 # Installs this release under /opt/homelab-ha-bridge, keeps (or creates) the
 # config in /etc/<name>-ha/config.json, and runs it as the <name>-ha systemd
-# service. It also upgrades a host from the older single-file <name>-ha bridges:
-# the config and state are kept, entity IDs stay the same (it checks first), and
-# the old program stays where it was so you can go back.
+# service. Re-running it on a host that already has a <name>-ha service keeps the
+# config and state, and first checks that every existing entity keeps its ID.
 #
 # Options:
 #   --name NAME            host name; drives topics, entity IDs and paths (required)
@@ -108,10 +107,10 @@ chmod 0600 "$CFG"
 echo "==> Checking this release against the host"
 /usr/bin/python3 -I "$SRC/bridge.py" --name "$NAME" --config "$CFG" --log-dir "$LOGDIR" --self-test
 if [ -f "$UNIT" ] && ! grep -q "$ROOT/" "$UNIT" && [ ! -f "$LOGDIR/state.json" ]; then
-  # An older bridge is installed but it doesn't keep state where the compose bridges do
-  # (e.g. an app-specific bridge): its entities can't be checked, so don't replace it.
-  echo "    $SVC is an older bridge whose entities this release can't check (no $LOGDIR/state.json)."
-  [ "$FORCE" = 1 ] || { echo "    Nothing was changed. This host type may not be supported yet; --force overrides."; exit 1; }
+  # Another program already runs as this service and keeps no state this release can
+  # read, so its entities can't be checked: don't replace it.
+  echo "    $SVC already exists and isn't this bridge; its entities can't be checked (no $LOGDIR/state.json)."
+  [ "$FORCE" = 1 ] || { echo "    Nothing was changed. --force replaces it anyway."; exit 1; }
 fi
 if [ -f "$LOGDIR/state.json" ]; then
   KEYS=$(/usr/bin/python3 -I "$SRC/bridge.py" --name "$NAME" --config "$CFG" --print-keys)
@@ -146,8 +145,7 @@ install -m 0755 "$DEST/guard.py" "$ROOT/guard.py"
 echo "==> Service $SVC"
 if [ -f "$UNIT" ] && ! grep -q "$ROOT/" "$UNIT"; then
   cp -p "$UNIT" "$UNIT.pre-$PROJECT"
-  OLD=$(sed -n 's/^ExecStart=.* \(\/opt\/[^ ]*\.py\).*/\1/p' "$UNIT" | head -1)
-  echo "    replacing the single-file bridge ${OLD:-} (its unit is saved as $UNIT.pre-$PROJECT)"
+  echo "    replacing the existing $SVC service (its unit is saved as $UNIT.pre-$PROJECT)"
 fi
 sed -e "s|@NAME@|$NAME|g" -e "s|@ROOT@|$ROOT|g" "$DEST/systemd/bridge.service.in" > "$UNIT"
 systemctl daemon-reload
@@ -162,5 +160,5 @@ else
   echo "Started, but not connected to MQTT yet. Check: journalctl -u $SVC -n 30"
 fi
 if [ -f "$UNIT.pre-$PROJECT" ]; then
-  echo "To go back to the old bridge: cp $UNIT.pre-$PROJECT $UNIT && systemctl daemon-reload && systemctl restart $SVC"
+  echo "To go back to the previous service: cp $UNIT.pre-$PROJECT $UNIT && systemctl daemon-reload && systemctl restart $SVC"
 fi

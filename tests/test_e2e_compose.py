@@ -1,4 +1,4 @@
-"""End-to-end scenarios for the compose + immich plugins (the immich-ha 1.0.3 suite, run against homelab-ha-bridge):
+"""End-to-end scenarios for the compose + immich plugins:
 real mosquitto, fake registry, docker shim, fake Immich API and release files."""
 import json, os, re, shutil, subprocess, sys, tempfile, threading, time
 from datetime import datetime, timedelta, timezone

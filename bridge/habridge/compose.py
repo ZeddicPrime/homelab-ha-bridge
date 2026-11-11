@@ -400,8 +400,7 @@ class ComposePlugin(Plugin):
             projects = dict(self.projects)
             # A folder whose compose file is temporarily unreadable keeps its entities.
             keep = {k for k in self.known
-                    if ((self.results.get(k) or {}).get("folder_name")
-                        or (self.results.get(k) or {}).get("title")) in self.failed_folders}
+                    if (self.results.get(k) or {}).get("folder_name") in self.failed_folders}
             gone = self.known - set(projects) - keep - set(self.groups)
         for key, p in projects.items():
             for component, oid, conf in self.entity_configs(p):
@@ -765,7 +764,7 @@ class ComposePlugin(Plugin):
         log.warning("%s: %s looks like a pre-release; not offering it (allow_prereleases is off)", key, latest)
         res["ignored_prerelease"] = latest
         res["latest_version"] = res.get("installed_version")
-        # The link stays on what's installed (single-file bridges kept the last offered release).
+        # The link stays on what's installed, not on the release that was held back.
         res["release_url"] = installed_url or res.get("release_url")
         res["release_summary"] = ""
 
@@ -865,7 +864,7 @@ class ComposePlugin(Plugin):
         g = self.groups[gkey]
         url = g.get("compose_check_url") or self.cfg.get("release_compose_url")
         if not url and "immich" in self.cfg:
-            url = IMMICH_COMPOSE_URL  # configs written by immich-ha 1.0.x don't name it
+            url = IMMICH_COMPOSE_URL  # Immich publishes docker-compose.yml with every release
         return url
 
     def check_group(self, gkey):
