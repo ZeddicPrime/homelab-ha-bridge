@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  release:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches VERSION
+        run: |
+          ver=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' bridge/habridge/__init__.py)
+          [ "v$ver" = "${GITHUB_REF_NAME%%-*}" ] || { echo "tag $GITHUB_REF_NAME doesn't match VERSION $ver"; exit 1; }
+      - name: Build
+        run: python3 tools/build_release.py --out dist
+      - name: Release notes from CHANGELOG.md
+        run: |
+          ver=${GITHUB_REF_NAME#v}; ver=${ver%%-*}
+          awk -v v="## $ver" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $ver"; exit 1; }
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md $pre

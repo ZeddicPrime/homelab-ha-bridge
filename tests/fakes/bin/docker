@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+# Fake Docker CLI for the bridge tests: compose config/pull/up, inspect, image inspect/prune, tag,
+# start/stop/restart, exec (pg_dumpall, cloudflared --version) and logs -f. State in $FAKE_DOCKER_STATE.
+import json, os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import fakelib
+ST = os.environ.get("FAKE_DOCKER_STATE")  # not needed for `logs` alone
+st = json.load(open(ST)) if ST else {"images": {}, "containers": {}}
+def save(): json.dump(st, open(ST, "w"), indent=1)
+def out(o): print(json.dumps(o) if not isinstance(o, str) else o)
+def die(msg, rc=1): print(msg, file=sys.stderr); sys.exit(rc)
+a = sys.argv[1:]
+with open(os.environ.get("FAKE_DOCKER_LOG", "/dev/null"), "a") as f: f.write(" ".join(a) + f"  (cwd={os.getcwd()})\n")
+def compose_cfg():
+    p = os.path.join(os.getcwd(), "compose.fake.json")
+    if not os.path.exists(p): die("no configuration file provided", 14)
+    return json.load(open(p))
+def split(ref):
+    ref = ref.split("@", 1)[0]
+    name, tag = ref.rsplit(":", 1)
+    host, repo = name.split("/", 1)
+    return name, repo, tag
+def fmt(f, c):
+    return {"{{.Image}}": c["Image"], "{{.State.Running}}": "true" if c["Running"] else "false"}[f]
+if a[:2] == ["compose", "version"]: print("Docker Compose version v2.40.0"); sys.exit(0)
+if a[:1] == ["compose"]:
+    cfg = compose_cfg()
+    if a[1] == "config": out(cfg); sys.exit(0)
+    svc = a[-1]; sc = cfg["services"][svc]
+    if a[1] == "pull":
+        name, repo, tag = split(sc["image"])
+        idx, _, labels = fakelib.objects(repo, tag)
+        iid = "sha256:img" + idx[7:19]
+        st["images"].setdefault(iid, {"RepoTags": [], "RepoDigests": [f"{name}@{idx}"], "Labels": labels})
+        for i in st["images"].values():
+            i["RepoTags"] = [t for t in i["RepoTags"] if t != sc["image"]]
+        st["images"][iid]["RepoTags"].append(sc["image"])
+        print(f" {svc} Pulled"); save(); sys.exit(0)
+    if a[1] == "up":
+        iid = next(k for k, v in st["images"].items() if sc["image"] in v["RepoTags"])
+        cn = sc.get("container_name") or f"{cfg['name']}-{svc}-1"
+        st["containers"][cn] = {"Image": iid, "Running": cn not in st.get("fail_start", []) and iid not in st.get("fail_images", [])}
+        print(f" Container {cn} Started"); save(); sys.exit(0)
+if a[0] == "exec":
+    if "pg_dumpall" in a:
+        if os.environ.get("FAKE_DUMP_FAIL"):
+            print("pg_dumpall: error: connection to server failed", file=sys.stderr); sys.exit(1)
+        print("-- PostgreSQL database cluster dump\n" + "SELECT 1;\n" * 40); sys.exit(0)
+    if "cloudflared" in a and "--version" in a:
+        c = st["containers"].get(a[1])
+        if not c or not c["Running"]:
+            die(f"Error response from daemon: container {a[1]} is not running")
+        img = st["images"][c["Image"]]
+        print(f"cloudflared version {img['Labels'].get('fake.cloudflared.version', '0.0.0')} (built 2026-10-30-1718 UTC)")
+        sys.exit(0)
+    die("unsupported exec", 2)
+if a[0] == "logs":
+    import time as _t
+    since = a[a.index("--since") + 1] if "--since" in a else ""
+    log = os.environ["FAKE_LOG"]; pos = 0
+    while True:
+        if os.path.exists(log + ".restart"):
+            os.remove(log + ".restart"); sys.exit(0)
+        if os.path.exists(log):
+            with open(log) as f:
+                f.seek(pos)
+                for line in f:
+                    if line.split(" ", 1)[0] >= since[:19]:
+                        sys.stdout.write(line); sys.stdout.flush()
+                pos = f.tell()
+        _t.sleep(0.2)
+if a[0] == "inspect":
+    if a[1] == "--format":
+        c = st["containers"].get(a[3]) or die(f"Error: No such object: {a[3]}")
+        out(fmt(a[2], c)); sys.exit(0)
+    res = []
+    for n in a[1:]:
+        c = st["containers"].get(n)
+        if not c: print(f"Error: No such object: {n}", file=sys.stderr); continue
+        stt = {"Running": c["Running"], "Status": "running" if c["Running"] else "exited",
+               "StartedAt": c.get("StartedAt", "2026-10-22T00:00:00Z"),
+               "FinishedAt": "0001-01-01T00:00:00Z", "ExitCode": c.get("ExitCode", 0)}
+        if c.get("Health"):
+            stt["Health"] = {"Status": c["Health"]}
+        res.append({"Name": "/" + n, "Image": c["Image"], "RestartCount": 0, "State": stt})
+    out(res); sys.exit(0 if len(res) == len(a) - 1 else 1)
+if a[0] in ("start", "stop", "restart"):
+    c = st["containers"].get(a[1]) or die(f"Error response from daemon: No such container: {a[1]}")
+    if a[0] == "stop": c["Running"] = False; c["ExitCode"] = 0
+    else: c["Running"] = True; c["StartedAt"] = f"2026-10-22T{len(open(os.environ['FAKE_DOCKER_LOG']).read().splitlines())%60:02d}:00:00Z"
+    print(a[1]); save(); sys.exit(0)
+if a[:2] == ["image", "inspect"]:
+    ref = a[2]
+    img = st["images"].get(ref) or next((v for v in st["images"].values() if ref in v["RepoTags"]), None)
+    if not img: die(f"Error: No such image: {ref}")
+    out([{"Config": {"Labels": img["Labels"]}, "RepoDigests": img["RepoDigests"], "RepoTags": img["RepoTags"]}]); sys.exit(0)
+if a[0] == "tag":
+    src, dst = a[1], a[2]
+    for i in st["images"].values(): i["RepoTags"] = [t for t in i["RepoTags"] if t != dst]
+    st["images"][src]["RepoTags"].append(dst); save(); sys.exit(0)
+if a[:2] == ["image", "prune"]:
+    used = {c["Image"] for c in st["containers"].values()}
+    for k in [k for k, v in st["images"].items() if not v["RepoTags"] and k not in used]:
+        del st["images"][k]; print("Deleted:", k)
+    save(); sys.exit(0)
+die("unsupported: " + " ".join(a), 2)

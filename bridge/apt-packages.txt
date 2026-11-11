@@ -1,0 +1,4 @@
+# Debian/Ubuntu packages every bridge needs. Self-update installs any that are missing.
+python3
+python3-paho-mqtt
+python3-yaml

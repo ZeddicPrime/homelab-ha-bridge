@@ -1,0 +1,17 @@
+[Unit]
+Description=Home Assistant entities and controls over MQTT (homelab-ha-bridge) - @NAME@
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Environment=HABRIDGE_ROOT=@ROOT@
+# Puts the previous release back if a self-update keeps failing to start.
+ExecStartPre=-/usr/bin/python3 -I @ROOT@/guard.py --name @NAME@ --root @ROOT@
+ExecStart=/usr/bin/python3 -I @ROOT@/current/bridge.py --name @NAME@
+Restart=always
+RestartSec=15
+# Don't kill a running `docker compose pull/up` if this service is restarted.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
