@@ -1,36 +1,61 @@
 name: release
 
+# A release is a commit on main whose VERSION has no release yet: this workflow
+# tests it, tags it v<VERSION>, builds the archive and SHA256SUMS, and publishes
+# the GitHub release that every bridge then offers as an Install button.
+
 on:
   push:
-    tags: ["v*.*.*"]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: v
+        name: Is this VERSION released yet?
+        run: |
+          ver=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' bridge/habridge/__init__.py)
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null; then
+            echo "v$ver already released; nothing to do"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: check
+    if: needs.check.outputs.release == 'true'
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
   release:
-    needs: test
+    needs: [check, test]
     runs-on: ubuntu-24.04
+    env:
+      VER: ${{ needs.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Tag matches VERSION
-        run: |
-          ver=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' bridge/habridge/__init__.py)
-          [ "v$ver" = "${GITHUB_REF_NAME%%-*}" ] || { echo "tag $GITHUB_REF_NAME doesn't match VERSION $ver"; exit 1; }
+      - uses: actions/checkout@v5
       - name: Build
         run: python3 tools/build_release.py --out dist
       - name: Release notes from CHANGELOG.md
         run: |
-          ver=${GITHUB_REF_NAME#v}; ver=${ver%%-*}
-          awk -v v="## $ver" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
-          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $ver"; exit 1; }
-      - name: Publish
+          awk -v v="## $VER" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $VER"; exit 1; }
+      - name: Tag and publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease";; esac
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md $pre
+          pre=""; case "$VER" in *-*) pre="--prerelease";; esac
+          gh release create "v$VER" dist/* --target "$GITHUB_SHA" --title "v$VER" --notes-file notes.md $pre

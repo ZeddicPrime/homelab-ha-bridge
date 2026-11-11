@@ -52,11 +52,14 @@ behaviour gets a scenario in the matching e2e suite.
    applies during 0.x too.
 2. Add a `## <version>` section at the top of `CHANGELOG.md`, first lines written for the
    person deciding whether to press Install.
-3. Commit, then tag `v<version>` and push the tag. The release workflow runs the tests,
-   checks the tag matches `VERSION`, builds `homelab-ha-bridge-<version>.tar.gz` and
-   `SHA256SUMS` with `tools/build_release.py`, and publishes the GitHub release. Every
-   bridge offers it within 6 hours, or at once on Check for updates.
-4. A tag with a suffix (`v2.1.0-rc.1`) becomes a pre-release, which bridges never offer.
+3. Commit and push to `main`. That commit is the release: the release workflow sees a
+   `VERSION` with no tag yet, runs the tests, tags it `v<version>`, builds
+   `homelab-ha-bridge-<version>.tar.gz` and `SHA256SUMS` with `tools/build_release.py`, and
+   publishes the GitHub release. Every bridge offers it within 6 hours, or at once on Check for
+   updates. Don't create tags by hand.
+4. A `VERSION` with a suffix (`0.2.0-rc.1`) becomes a pre-release, which bridges never offer.
+5. Changes that aren't ready to release go to a branch, not `main`, or leave `VERSION` alone
+   (pushing to `main` without a new `VERSION` releases nothing).
 
 ## Layout
 
