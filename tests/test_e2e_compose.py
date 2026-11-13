@@ -207,8 +207,9 @@ press("immich/server/restart", "RESTART")  # must be refused during the install
 press("immich/app/install", "INSTALL")    # double press
 check("installed v3.3.6", wait(lambda: app().get("installed_version") == "v3.3.6" and not app().get("in_progress"), 30),
       app())
+check("result text", wait(lambda: app_attr().get("last_install_result") == "Updated v3.3.5 → v3.3.6", 5),
+      app_attr().get("last_install_result"))  # state and attributes are separate messages
 a = app_attr()
-check("result text", a.get("last_install_result") == "Updated v3.3.5 → v3.3.6", a.get("last_install_result"))
 check("dump written", a.get("dump_file", "").endswith(".sql.gz") and os.path.getsize(a["dump_file"]) > 100, a)
 check("previous tags for both", set(a.get("previous_tags", {})) == {"server", "machine_learning"}, a.get("previous_tags"))
 dl = open(os.environ["FAKE_DOCKER_LOG"]).read()
