@@ -3,6 +3,15 @@
 Bridges show the section for a release as its release notes in Home Assistant, so the
 first lines of each section should say what changes for someone pressing Install.
 
+## 0.5.0
+
+For apps a vendor install runs from a systemd unit. Nothing changes on a host unless its config uses the new option.
+
+- New Compose option `systemd_units` (`{"<key>": "name.service"}`): Power and Restart for that
+  service go through the unit (`systemctl enable --now` / `disable --now` / `restart`), so Power
+  off really stops it and keeps it off after a reboot.
+- A Compose folder whose name starts with a dot (a vendor's hidden folder) is labelled without it.
+
 ## 0.4.0
 
 For apps that update themselves. Nothing changes on a host unless its config uses the new option.

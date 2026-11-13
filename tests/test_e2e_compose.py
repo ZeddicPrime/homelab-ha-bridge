@@ -504,6 +504,43 @@ time.sleep(3)
 check("auto-updated: an install command does nothing",
       open(os.environ["FAKE_DOCKER_LOG"]).read().count("compose pull cloudflared") == n_pull and not cf().get("in_progress"), cf())
 
+print("Q. service run by a systemd unit: Power and Restart go through the unit")
+SC = f"{T}/systemctl"
+SCLOG = f"{T}/systemctl.log"
+with open(SC, "w") as f:
+    f.write(f"""#!{sys.executable}
+import subprocess, sys
+a = sys.argv[1:]
+open({SCLOG!r}, "a").write(" ".join(a) + "\\n")
+# stand-in for the unit: it starts and stops the container
+verb = {{"enable": "start", "disable": "stop", "restart": "restart"}}[a[0]]
+sys.exit(subprocess.run(["docker", verb, "cloudflared"]).returncode)
+""")
+os.chmod(SC, 0o755)
+bridge.terminate(); bridge.wait()
+cfg = json.load(open(f"{T}/config.json"))
+cfg["systemd_units"] = {"cloudflared": "fake-cf.service", "redis": "bad unit; rm -rf /"}
+cfg["systemctl"] = SC
+jw(f"{T}/config.json", cfg)
+start_bridge()
+check("unit: online", wait(lambda: last("immich/availability") == "online"))
+check("unit: named in the running attributes", wait(lambda: (last("immich/cloudflared/running/attributes", js=True) or {})
+                                                     .get("systemd_unit") == "fake-cf.service"))
+press("immich/cloudflared/power/set", "OFF")
+check("unit: Power OFF = systemctl disable --now", wait(lambda: os.path.exists(SCLOG)
+      and "disable --now fake-cf.service" in open(SCLOG).read(), 10))
+check("unit: stopped", wait(lambda: last("immich/cloudflared/running") == "OFF", 10))
+press("immich/cloudflared/power/set", "ON")
+check("unit: Power ON = systemctl enable --now", wait(lambda: "enable --now fake-cf.service" in open(SCLOG).read(), 10))
+check("unit: running again", wait(lambda: last("immich/cloudflared/running") == "ON", 10))
+press("immich/cloudflared/restart", "RESTART")
+check("unit: Restart = systemctl restart", wait(lambda: "restart fake-cf.service" in open(SCLOG).read(), 10))
+n_sc = open(SCLOG).read().count("\n")
+press("immich/redis/restart", "RESTART")
+time.sleep(3)
+check("unit: a bad unit name is ignored (redis restarts through Docker)", open(SCLOG).read().count("\n") == n_sc
+      and "Ignoring systemd unit" in open(f"{T}/bridge.out").read())
+
 print("K. HA schema")
 with lock:
     allm = list(msgs)

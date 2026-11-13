@@ -93,6 +93,10 @@ power-on (no network or clock yet) is retried ten minutes later.
   up to date (its own Watchtower, say), list its key there. Its update entity still shows the
   installed and newest versions, so you can see whether the updater keeps up, but has no Install,
   and its notes say who installs updates. Running, power and restart work as usual.
+- **Services a systemd unit runs** (config `systemd_units`): some vendor installs start the app
+  from a unit that runs `docker compose up` in the foreground and restarts it whenever it exits.
+  Stopping the container through Docker would only make the unit start it again, so for these
+  Power and Restart use the unit, and Power off also keeps it off after a reboot.
 - **Groups update together** (config `groups`): e.g. an app server and its worker always get the same
   version, after an optional database dump, and only when the release's `docker-compose.yml`
   doesn't change settings your compose file lacks (new environment variables, images, services,
@@ -165,6 +169,7 @@ python3 -I homelab-ha-bridge-$VER/bridge/bridge.py --name media --check-discover
 | `titles` | `{}` | Display name per key |
 | `version_prefix` | `""` | Added to label versions that lack it (`2.10.7` → `v2.10.7`) |
 | `allow_prereleases` | `[]` | Keys (or group keys) that may be offered pre-releases |
+| `systemd_units` | `{}` | `{"<key>": "name.service"}` for a service a systemd unit runs (e.g. `docker compose up` in the foreground): Power = `systemctl enable --now` / `disable --now`, Restart = `systemctl restart` |
 | `auto_updated` | `{}` | `{"<key>": "who updates it"}` for services whose own install updates them (e.g. a vendor's Watchtower): versions are shown, Install isn't offered |
 | `groups` | `{}` | `{"app": {"title": "...", "members": ["server", "worker"], "health_of": "server", "compose_check_url": ".../{version}/docker-compose.yml"}}` |
 | `db_dump` | none | For groups: `{"container": "...", "user": "postgres", "dir": "...", "keep": 3}` |

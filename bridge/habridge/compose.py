@@ -22,6 +22,11 @@ for an app whose vendor install updates itself (e.g. its own Watchtower). Their
 update entity still shows installed vs. latest, but has no Install: the
 summary says who installs it, and an install command for them does nothing.
 
+Services run by a systemd unit (config "systemd_units": {key: "name.service"}),
+e.g. a vendor install whose unit runs `docker compose up` in the foreground: Power
+and Restart go through that unit (systemctl enable --now / disable --now /
+restart) instead of Docker, so stopping really stops it and survives a reboot.
+
 Stable releases only: a version that looks like a pre-release is never offered
 or installed unless its key is in "allow_prereleases". Only the exact fixed
 payloads on a known service's command topics do anything; the docker commands
@@ -56,6 +61,7 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger("habridge.compose")
 
 PRESS_PAYLOAD = "INSTALL"
+UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._:-]*\.service")
 RESTART_PAYLOAD = "RESTART"
 ON, OFF = "ON", "OFF"
 COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
@@ -260,6 +266,14 @@ class ComposePlugin(Plugin):
         self.root = cfg.get("compose_root", f"/opt/{b.name}")
         self.prefix = cfg.get("version_prefix", "")
         self.titles = cfg.get("titles") or {}
+        units = cfg.get("systemd_units") or {}
+        self.units = {}
+        for k, u in units.items():
+            if isinstance(u, str) and UNIT_RE.fullmatch(u):
+                self.units[k] = u
+            else:
+                log.warning("Ignoring systemd unit %r for %s: not a plain unit name", u, k)
+        self.systemctl = cfg.get("systemctl", "systemctl")
         au = cfg.get("auto_updated") or {}
         # {key: "who updates it"}; a plain list of keys is accepted too
         self.auto_updated = ({k: "an updater on this host" for k in au} if isinstance(au, list)
@@ -323,7 +337,7 @@ class ComposePlugin(Plugin):
         if self.titles.get(p["key"]):
             return self.titles[p["key"]]
         if p["key"] == slug(p["folder"]):
-            return p["folder"]
+            return p["folder"].lstrip(".") or p["folder"]  # a vendor's hidden folder (.app) reads as "app"
         if slug(p["folder"]) == self.b.name:
             return p["service"]  # "immich-server", "redis", ...
         return f"{p['folder']} {p['service']}"
@@ -493,6 +507,8 @@ class ComposePlugin(Plugin):
             s = dict(self.status.get(key) or {})
         if not s:
             return
+        if key in self.units:
+            s["systemd_unit"] = self.units[key]
         t = self.topics(key)
         self.b.publish(t["run"], ON if s.get("running") else OFF)
         self.b.publish(t["run_attr"], json.dumps(s))
@@ -595,7 +611,16 @@ class ComposePlugin(Plugin):
             with self.lock:
                 p = dict(self.projects[key])
             log.info("%s: %s requested from Home Assistant", key, action)
-            if action == "start":
+            unit = self.units.get(key)
+            if unit:
+                # The unit runs the container; Docker alone would be undone by its restart policy.
+                args = {"start": ["enable", "--now", unit], "stop": ["disable", "--now", unit],
+                        "restart": ["restart", unit]}[action]
+                r = subprocess.run([self.systemctl, *args], capture_output=True, text=True, timeout=300,
+                                   stdin=subprocess.DEVNULL)
+                if r.returncode != 0:
+                    raise RuntimeError(f"systemctl {' '.join(args)} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+            elif action == "start":
                 r = docker("start", p["container"], check=False, timeout=120)
                 if r.returncode != 0:  # container was removed: let compose recreate it
                     docker("compose", "up", "-d", p["service"], cwd=p["dir"], timeout=300)
