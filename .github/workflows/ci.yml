@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -29,14 +30,21 @@ jobs:
       - name: Immich monitor
         run: /usr/bin/python3 tests/test_immich_monitor.py
       - name: Self-update end to end
-        run: /usr/bin/python3 tests/test_e2e_selfupdate.py
+        timeout-minutes: 17
+        run: timeout 900 /usr/bin/python3 tests/test_e2e_selfupdate.py
       - name: Compose end to end
-        run: /usr/bin/python3 tests/test_e2e_compose.py
+        timeout-minutes: 17
+        run: timeout 900 /usr/bin/python3 tests/test_e2e_compose.py
       - name: Application plugins end to end
-        run: /usr/bin/python3 tests/test_e2e_apps.py
+        timeout-minutes: 17
+        run: timeout 900 /usr/bin/python3 tests/test_e2e_apps.py
       - name: Bridge logs (on failure)
-        if: failure()
+        if: failure() || cancelled()
         run: |
+          sudo pip install --break-system-packages -q py-spy || true
+          for pid in $(pgrep -f "bridge.py --name"); do
+            echo "::group::threads of $(tr '\0' ' ' < /proc/$pid/cmdline)"; sudo py-spy dump --pid "$pid" || true; echo "::endgroup::"
+          done
           for f in /tmp/imha-e2e-*/bridge.out /tmp/habridge-*/*.out /tmp/habridge-*/*/log/*.log; do
             [ -f "$f" ] || continue
             echo "::group::$f"; tail -n 150 "$f"; echo "::endgroup::"
