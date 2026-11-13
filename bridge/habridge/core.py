@@ -102,6 +102,9 @@ class Bridge:
         self.stop = threading.Event()
         self.connected = threading.Event()
         self.save_lock = threading.Lock()
+        self.save_seq_lock = threading.Lock()
+        self.save_seq = 0     # handed out to each save_state call
+        self.saved_seq = 0    # the newest one written
         os.makedirs(log_dir, exist_ok=True)
         self.state_file = os.path.join(log_dir, "state.json")
         self.state = self._load_state()
@@ -144,10 +147,22 @@ class Bridge:
         return None
 
     def save_state(self):
+        """Write every plugin's state. Plugins may call this while holding their own lock, so
+        the snapshots are taken before save_lock: save_lock is never held while waiting for a
+        plugin's lock. A save that took its snapshots before a newer save was written is
+        skipped (the newer one already includes its change)."""
+        with self.save_seq_lock:
+            self.save_seq += 1
+            seq = self.save_seq
+        snaps = {}
+        for p in self.plugins:
+            snaps.update(p.snapshot())
         with self.save_lock:
+            if seq < self.saved_seq:
+                return
+            self.saved_seq = seq
             data = dict(self.state)
-            for p in self.plugins:
-                data.update(p.snapshot())
+            data.update(snaps)
             self.state = data
             write_json_atomic(self.state_file, data)
 

@@ -472,11 +472,12 @@ class HostOSPlugin(Plugin):
         if payload != INSTALL or not self.has_apt:
             log.warning("Ignored unexpected command on %s", topic)
             return True
+        # Asked before taking self.lock: never hold this plugin's lock while waiting for another's.
+        other = next((p.busy_reason() for p in self.bridge.plugins if p is not self and p.busy_reason()), None)
         with self.lock:
             if self.installing:
                 log.info("OS install already running; ignored")
                 return True
-            other = next((p.busy_reason() for p in self.bridge.plugins if p is not self and p.busy_reason()), None)
             if other:
                 log.info("OS install not started: %s is running", other)
                 self.st.update(last_install=util.now_iso(), last_install_status="refused",

@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bridge"))
@@ -165,6 +166,68 @@ class Busy(unittest.TestCase):
         self.assertEqual(b.busy_reason(), "Jellyfin update")
         b.plugins = [P(None)]
         self.assertIsNone(b.busy_reason())
+
+
+class SaveState(unittest.TestCase):
+    def make(self):
+        import tempfile
+        import threading
+        from habridge.core import Bridge, Plugin
+
+        class P(Plugin):
+            def __init__(self, key):
+                self.key, self.lock, self.value = key, threading.RLock(), 0
+
+            def snapshot(self):
+                with self.lock:
+                    return {self.key: self.value}
+
+        d = tempfile.mkdtemp()
+        b = Bridge({"mqtt": {"host": "127.0.0.1"}}, "box", os.path.join(d, "c.json"), d)
+        b.plugins = [P("a"), P("b")]
+        return b
+
+    def test_plugin_saving_under_its_own_lock_cannot_deadlock(self):
+        # A plugin that saves while holding its lock (a log follower does) and another
+        # thread saving at the same moment used to wait on each other forever.
+        import threading
+        b = self.make()
+        a = b.plugins[0]
+        in_lock, done = threading.Event(), []
+
+        def follower():
+            with a.lock:
+                a.value = 1
+                in_lock.set()
+                time.sleep(0.3)  # the other save starts meanwhile and needs a.lock
+                b.save_state()
+            done.append("follower")
+
+        def other():
+            in_lock.wait()
+            b.save_state()
+            done.append("other")
+
+        ts = [threading.Thread(target=follower, daemon=True), threading.Thread(target=other, daemon=True)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(5)
+        self.assertEqual(sorted(done), ["follower", "other"])
+        with open(b.state_file) as f:
+            self.assertEqual(json.load(f)["a"], 1)
+
+    def test_an_older_snapshot_never_overwrites_a_newer_one(self):
+        b = self.make()
+        b.plugins[1].value = 5
+        b.saved_seq = 2          # a newer save was written ...
+        b.save_seq = 0           # ... so this one (seq 1, snapshot taken earlier) is skipped
+        b.save_state()
+        self.assertFalse(os.path.exists(b.state_file))
+        b.save_seq = 5
+        b.save_state()
+        with open(b.state_file) as f:
+            self.assertEqual(json.load(f)["b"], 5)
 
 
 

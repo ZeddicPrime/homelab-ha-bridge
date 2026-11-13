@@ -3,6 +3,12 @@
 Bridges show the section for a release as its release notes in Home Assistant, so the
 first lines of each section should say what changes for someone pressing Install.
 
+## 0.3.1
+
+Fixes a lock-up: a bridge could stop updating Home Assistant (and not stop cleanly)
+when two parts of it saved their state at the same moment. On an Immich host this was
+rare before 0.3.0 and much more likely with it. Install this on every host that has 0.3.0.
+
 ## 0.3.0
 
 OS updates from Home Assistant. Every host gets four new entities; nothing existing changes.

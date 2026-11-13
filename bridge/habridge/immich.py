@@ -329,8 +329,8 @@ class ImmichMonitor:
                    "known_user": bool(known), "user": (known or {}).get("name") or email}
             self.state["failed"].append(rec)
             self._prune_failed()
-            self.save_state()
             count = len(self.state["failed"])
+        self.save_state()  # never while holding self.lock: saving reads every plugin's state
         self.publish(self._t("login", "event"), json.dumps(clean(dict(event_type="login_failed", failed_24h=count, **rec))), False)
         self.log("warning", f"Immich failed sign-in for {email} from {ip}")
         self._publish_failed()
