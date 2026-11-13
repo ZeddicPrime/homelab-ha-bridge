@@ -17,6 +17,11 @@ server and its machine-learning worker. They get one update entity, an
 optional database dump first, and a release compose-file check that refuses
 Install while the release changes settings the local compose file lacks.
 
+Auto-updated services (config "auto_updated": {key: "who updates it"}) are
+for an app whose vendor install updates itself (e.g. its own Watchtower). Their
+update entity still shows installed vs. latest, but has no Install: the
+summary says who installs it, and an install command for them does nothing.
+
 Stable releases only: a version that looks like a pre-release is never offered
 or installed unless its key is in "allow_prereleases". Only the exact fixed
 payloads on a known service's command topics do anything; the docker commands
@@ -255,6 +260,10 @@ class ComposePlugin(Plugin):
         self.root = cfg.get("compose_root", f"/opt/{b.name}")
         self.prefix = cfg.get("version_prefix", "")
         self.titles = cfg.get("titles") or {}
+        au = cfg.get("auto_updated") or {}
+        # {key: "who updates it"}; a plain list of keys is accepted too
+        self.auto_updated = ({k: "an updater on this host" for k in au} if isinstance(au, list)
+                             else {k: str(v or "an updater on this host") for k, v in au.items()})
         self.interval = float(cfg.get("check_interval_hours", 6)) * 3600
         self.reg = Registry(USER_AGENT)
         self.arch = local_arch()
@@ -378,6 +387,12 @@ class ComposePlugin(Plugin):
         if key in self.member_of:
             # Grouped services update only through the group's own update entity.
             confs = [c for c in confs if c[0] != "update"]
+        if key in self.auto_updated:
+            # Updated by something else on the host: show versions, offer no Install.
+            for c in confs:
+                if c[0] == "update":
+                    c[2].pop("command_topic", None)
+                    c[2].pop("payload_install", None)
         return confs
 
     def group_ready(self, gkey, projects=None):
@@ -440,6 +455,14 @@ class ComposePlugin(Plugin):
         if not r:
             return
         t = self.topics(key)
+        summary = r.get("release_summary") or ""
+        by = self.auto_updated.get(key)
+        if by:
+            r["auto_updated"] = True
+            r["updated_by"] = by
+            if r.get("latest_version") and r.get("latest_version") != r.get("installed_version"):
+                note = f"Installed automatically by {by}; nothing to do here."
+                summary = (note + " " + summary)[:255] if summary else note
         state = {
             "installed_version": r.get("installed_version"),
             "latest_version": r.get("latest_version"),
@@ -447,7 +470,7 @@ class ComposePlugin(Plugin):
             "release_url": r.get("release_url"),
             "in_progress": in_progress,
             # Always sent (as "" when none) so HA clears an old summary.
-            "release_summary": (r.get("release_summary") or "")[:255],
+            "release_summary": summary[:255],
         }
         # HA drops the WHOLE message if any key is null (cv.string / cv.url).
         state = {k: v for k, v in state.items() if v is not None}
@@ -515,6 +538,9 @@ class ComposePlugin(Plugin):
         key, kind = m.group(1), m.group(2)
         action = {"install": "install", "restart": "restart",
                   "power/set": "start" if payload == ON else "stop"}[kind]
+        if action == "install" and key in self.auto_updated:
+            log.warning("Ignored install for %s: it is updated by %s", key, self.auto_updated[key])
+            return True
         if action == "install" and (key in self.groups or key in self.projects):
             # Another plugin's install (OS packages can restart Docker itself) comes first.
             other = next((p.busy_reason() for p in self.b.plugins if p is not self and p.busy_reason()), None)

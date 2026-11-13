@@ -81,13 +81,18 @@ power-on (no network or clock yet) is retried ten minutes later.
 
 ## Rules it follows
 
-- **Click to install.** Nothing updates on its own. A person presses Install in Home Assistant.
+- **Click to install.** The bridge never updates anything on its own: a person presses Install in
+  Home Assistant. (An app that keeps its vendor's own updater is listed in `auto_updated`, below.)
 - **Stable releases only.** A version that looks like a pre-release (`rc`, `beta`, `dev`, `nightly`, ...)
   is reported in the attributes but never offered or installed, unless its key is in `allow_prereleases`.
 - **Fixed commands.** Only exact payloads (`INSTALL`, `ON`/`OFF`, `RESTART`, `CHECK`) on a known
   service's own command topic do anything. Nothing from a message is ever run.
 - **Retained commands are ignored** and cleared from the broker, so nothing replays on reconnect.
 - **Entity IDs never change** between versions. The installer checks this before switching.
+- **Auto-updated services** (config `auto_updated`): when an app's vendor install keeps itself
+  up to date (its own Watchtower, say), list its key there. Its update entity still shows the
+  installed and newest versions, so you can see whether the updater keeps up, but has no Install,
+  and its notes say who installs updates. Running, power and restart work as usual.
 - **Groups update together** (config `groups`): e.g. an app server and its worker always get the same
   version, after an optional database dump, and only when the release's `docker-compose.yml`
   doesn't change settings your compose file lacks (new environment variables, images, services,
@@ -160,6 +165,7 @@ python3 -I homelab-ha-bridge-$VER/bridge/bridge.py --name media --check-discover
 | `titles` | `{}` | Display name per key |
 | `version_prefix` | `""` | Added to label versions that lack it (`2.10.7` → `v2.10.7`) |
 | `allow_prereleases` | `[]` | Keys (or group keys) that may be offered pre-releases |
+| `auto_updated` | `{}` | `{"<key>": "who updates it"}` for services whose own install updates them (e.g. a vendor's Watchtower): versions are shown, Install isn't offered |
 | `groups` | `{}` | `{"app": {"title": "...", "members": ["server", "worker"], "health_of": "server", "compose_check_url": ".../{version}/docker-compose.yml"}}` |
 | `db_dump` | none | For groups: `{"container": "...", "user": "postgres", "dir": "...", "keep": 3}` |
 | `plugins` | `["compose"]` | See Plugins; each plugin's own settings go in a section named after it (`immich`, `jellyfin`, `foundry`, `anthias`), described at the top of its module in `bridge/habridge/` |

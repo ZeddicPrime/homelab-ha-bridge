@@ -478,6 +478,32 @@ check("nothing ran for it", open(os.environ["FAKE_DOCKER_LOG"]).read().count("pg
 os.remove(HOLD)
 check("os install finishes", wait(lambda: (last("immich/host-os/packages/state", js=True) or {}).get("in_progress") is False, 20))
 
+print("P. auto-updated service: versions shown, no Install")
+bridge.terminate(); bridge.wait()
+cfg = json.load(open(f"{T}/config.json"))
+cfg["auto_updated"] = {"cloudflared": "its vendor's Watchtower"}
+jw(f"{T}/config.json", cfg)
+reg["cloudflare/cloudflared"]["latest"]["labels"]["fake.cloudflared.version"] = "2026.12.0"
+reg["cloudflare/cloudflared"]["latest"]["labels"]["fake.build"] = "3"
+jw(f"{T}/reg.json", reg)
+api["gh"] = "2026.12.0"; jw(f"{T}/api.json", api)
+start_bridge()
+check("auto-updated: update entity has no Install",
+      wait(lambda: "command_topic" not in (disc("update", "cloudflared") or {"command_topic": 1})
+           and "payload_install" not in disc("update", "cloudflared")), disc("update", "cloudflared"))
+check("auto-updated: other services keep Install", "command_topic" in (disc("update", "redis") or {}))
+press("immich/check", "CHECK")
+check("auto-updated: newer version still shown", wait(lambda: cf().get("latest_version") == "2026.12.0"), cf())
+check("auto-updated: summary says who installs it",
+      cf().get("release_summary", "").startswith("Installed automatically by its vendor's Watchtower; nothing to do here."), cf())
+ca = last("immich/cloudflared/attributes", js=True) or {}
+check("auto-updated: attributes", ca.get("auto_updated") is True and ca.get("updated_by") == "its vendor's Watchtower", ca)
+n_pull = open(os.environ["FAKE_DOCKER_LOG"]).read().count("compose pull cloudflared")
+press("immich/cloudflared/install", "INSTALL")
+time.sleep(3)
+check("auto-updated: an install command does nothing",
+      open(os.environ["FAKE_DOCKER_LOG"]).read().count("compose pull cloudflared") == n_pull and not cf().get("in_progress"), cf())
+
 print("K. HA schema")
 with lock:
     allm = list(msgs)

@@ -3,6 +3,14 @@
 Bridges show the section for a release as its release notes in Home Assistant, so the
 first lines of each section should say what changes for someone pressing Install.
 
+## 0.4.0
+
+For apps that update themselves. Nothing changes on a host unless its config uses the new option.
+
+- New Compose option `auto_updated` (`{"<key>": "who updates it"}`): for a service whose
+  vendor install keeps it up to date (its own Watchtower, say). Its update entity still shows
+  installed and newest versions but offers no Install, and its notes say who installs updates.
+
 ## 0.3.2
 
 Small fixes to OS packages; nothing else changes.
