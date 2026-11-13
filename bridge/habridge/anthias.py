@@ -21,7 +21,8 @@ Config, all under "anthias":
   containers {viewer, redis}   default anthias-anthias-viewer-1, anthias-redis-1
   poll_seconds (30), boot_grace_seconds (180), api_failures_before_problem (3),
   auto_fix_cec (true), cec_fix_after_seconds (60), update_check_hours (6),
-  github_repo (Screenly/Anthias)
+  github_repo (Screenly/Anthias), busy_wait_minutes (45): how long Shut down and
+  Reboot wait for an install on this Pi (OS packages, a bridge update) to finish
 """
 
 import base64
@@ -288,6 +289,18 @@ class AnthiasPlugin(Plugin):
             return rc == 0, out.strip()[:300] or f"exit {rc}"
         if key in ("reboot", "shutdown"):
             verb = "reboot" if key == "reboot" else "poweroff"
+            # An install (OS packages, a bridge update) must not be cut short: wait for it,
+            # then go ahead, so a power-off routine that waits for Online to turn off still works.
+            deadline = time.time() + float(self.a.get("busy_wait_minutes", 45)) * 60
+            why = self.bridge.busy_reason()
+            if why:
+                label = BUTTONS[key]["name"]
+                log.info("%s waits for %s to finish", label, why)
+                self.pub(self.t("last_action"), f"{label}: waiting for {why}"[:250])
+                while why and time.time() < deadline and not self.bridge.stop.wait(5):
+                    why = self.bridge.busy_reason()
+                if why:
+                    return False, f"Not done: {why} still running after {self.a.get('busy_wait_minutes', 45)} minutes"
             # Say so first: once systemd stops this service nothing more gets out.
             info = self.set_last_action(key, True, f"systemctl {verb} requested")
             self.save()

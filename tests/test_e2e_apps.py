@@ -1,6 +1,6 @@
-"""End-to-end scenarios for the application plugins (Jellyfin, Foundry VTT): real
+"""End-to-end scenarios for the application plugins (Jellyfin, Foundry VTT, OS, Anthias): real
 mosquitto, fake application servers (fakes/fake_apps.py) and fake host commands
-(systemctl, dpkg-query, apt, nvidia-smi, an update command) written into a temp
+(systemctl, dpkg-query, apt, dpkg, nvidia-smi, an update command) written into a temp
 folder. Also covers --check-discovery and the "don't restart during an install" rule."""
 import json, os, shutil, subprocess, sys, tempfile, textwrap, threading, time
 
@@ -473,6 +473,189 @@ h["installed"] = h["candidate"]; save(); print("done")
     check("F7 --check-discovery: a removal the bridge made itself isn't a loss", rc == 0, out)
     stop(fb)
 
+    # ================================================================== OS plugin
+    print("O. OS plugin (apt, reboot required, disk)")
+    O = f"{T}/box"
+    OBIN = f"{O}/bin"
+    os.makedirs(OBIN)
+    os.makedirs(f"{O}/modules/6.1.0-27-amd64")
+    OH = f"{O}/host.json"
+    PKGS = [["libssl3", "3.0.14-1", "3.0.15-1", "Debian-Security:12/stable-security"],
+            ["openssl", "3.0.14-1", "3.0.15-1", "Debian-Security:12/stable-security"],
+            ["tzdata", "2024a-0", "2024b-0", "Debian:12.8/stable"]]
+    jw(OH, {"pending": PKGS, "kept": [], "audit": "", "update_rc": 0, "upgrade_rc": 0, "hold": False,
+            "reboot_after": False, "calls": []})
+    oshim = textwrap.dedent(f"""\
+        #!{sys.executable}
+        import json, os, sys, time
+        H = {OH!r}
+        def load(): return json.load(open(H))
+        def save(h): json.dump(h, open(H + ".tmp", "w")); os.replace(H + ".tmp", H)
+        cmd, a = os.path.basename(sys.argv[0]), sys.argv[1:]
+        h = load()
+        h["calls"].append([cmd] + a + ["NEEDRESTART_MODE=" + os.environ.get("NEEDRESTART_MODE", "")])
+        save(h)
+        """)
+    obodies = {
+        "apt-get": """
+if "-s" in a:
+    if h["kept"]:
+        print("The following packages have been kept back:"); print("  " + " ".join(h["kept"]))
+    for n, f, t, o in h["pending"]: print(f"Inst {n} [{f}] ({t} {o} [amd64])")
+    sys.exit(0)
+if "update" in a:
+    if h["update_rc"]: print("E: Temporary failure resolving 'deb.example.org'"); sys.exit(h["update_rc"])
+    sys.exit(0)
+if "upgrade" in a:
+    print("Reading package lists..."); sys.stdout.flush()
+    while load()["hold"]: time.sleep(0.2)
+    h = load()
+    if h["upgrade_rc"]: print("E: Could not get lock /var/lib/dpkg/lock-frontend"); sys.exit(h["upgrade_rc"])
+    for n, f, t, o in h["pending"]: print(f"Setting up {n} ({t}) ...")
+    h["pending"] = []
+    if h["reboot_after"]:
+        open(H.rsplit("/", 1)[0] + "/reboot-required", "w").write("*** System restart required ***\\n")
+    save(h); sys.exit(0)
+sys.exit(1)
+""",
+        "dpkg": """
+if a == ["--audit"]: print(h["audit"], end=""); sys.exit(0)
+if "--configure" in a: h["audit"] = ""; save(h); sys.exit(0)
+sys.exit(1)
+""",
+    }
+    for cmd, body in obodies.items():
+        with open(f"{OBIN}/{cmd}", "w") as f:
+            f.write(oshim + body)
+        os.chmod(f"{OBIN}/{cmd}", 0o755)
+    open(f"{O}/os-release", "w").write('NAME="Debian GNU/Linux"\nVERSION_ID="12"\nID=debian\n')
+    open(f"{O}/debian_version", "w").write("12.8\n")
+    OCFG = f"{O}/config.json"
+    ocfg = {"mqtt": {"host": "127.0.0.1", "port": BPORT}, "plugins": [], "device_name": "Test Box",
+            "self_update": {"api": f"{API}/no-github", "check_interval_hours": 100},
+            "os": {"path": OBIN, "first_check_seconds": 0.5, "poll_minutes": 0.02, "disk_paths": ["/", O],
+                   "reboot_required_file": f"{O}/reboot-required", "modules_dir": f"{O}/modules",
+                   "os_release": f"{O}/os-release", "debian_version": f"{O}/debian_version",
+                   "kernel_release": "6.1.0-27-amd64", "container": False}}
+    jw(OCFG, ocfg)
+    OLOG = f"{O}/log"
+    ob = run_bridge("box", OCFG, OLOG)
+
+    def ost(): return last("box/host-os/packages/state", js=True) or {}
+    def oat(): return last("box/host-os/packages/attributes", js=True) or {}
+    def ocalls(): return jr(OH)["calls"]
+
+    check("O1 discovery: OS packages", wait(lambda: disc("update", "box_ha", "os_packages")), open(f"{T}/box.out").read()[-2000:])
+    u = disc("update", "box_ha", "os_packages") or {}
+    check("O1 update entity: IDs, install command, availability", u.get("unique_id") == "box_ha_os_packages"
+          and u.get("default_entity_id") == "update.box_os_packages" and u.get("command_topic") == "box/host-os/packages/install"
+          and u.get("payload_install") == "install" and u.get("availability_topic") == "box/availability", u)
+    slugO = O.strip("/").replace("/", "_").replace("-", "_").lower()
+    check("O1 reboot, disk and disk-full entities",
+          (disc("binary_sensor", "box_ha", "reboot_required") or {}).get("device_class") == "problem"
+          and (disc("sensor", "box_ha", "disk_used") or {}).get("unit_of_measurement") == "%"
+          and disc("sensor", "box_ha", f"disk_used_{slugO}")
+          and (disc("binary_sensor", "box_ha", "disk_almost_full") or {}).get("unique_id") == "box_ha_disk_almost_full")
+    check("O2 pending updates after the first check", wait(lambda: ost().get("latest_version") == "3 updates"), ost())
+    s0 = ost()
+    check("O2 installed shows the release; summary lists packages and security",
+          s0.get("installed_version") == "Debian 12.8" and "(2 security)" in s0.get("release_summary", "")
+          and "libssl3, openssl, tzdata" in s0.get("release_summary", "") and s0.get("in_progress") is False, s0)
+    check("O2 attributes", oat().get("pending") == 3 and oat().get("security") == 2
+          and oat().get("packages", [None])[0] == "libssl3 3.0.14-1 → 3.0.15-1" and oat().get("restarts_docker") is False, oat())
+    check("O2 refreshed the package lists first", any(c[:2] == ["apt-get", "update"] for c in ocalls()))
+    check("O3 disk used", wait(lambda: last("box/host-os/disk_used") not in (None, "")) and 0 <= float(last("box/host-os/disk_used")) <= 100)
+    check("O3 disk not almost full", last("box/host-os/disk_almost_full") == "OFF"
+          and (last("box/host-os/disk_used/attributes", js=True) or {}).get("total_gib", 0) > 0)
+    check("O4 no reboot needed", wait(lambda: last("box/host-os/reboot_required") == "OFF"))
+    os.makedirs(f"{O}/modules/6.1.0-28-amd64")
+    check("O4 newer kernel installed: reboot required", wait(lambda: last("box/host-os/reboot_required") == "ON", 10)
+          and "6.1.0-28-amd64" in " ".join((last("box/host-os/reboot_required/attributes", js=True) or {}).get("reasons", [])))
+    os.rmdir(f"{O}/modules/6.1.0-28-amd64")
+    check("O4 clears", wait(lambda: last("box/host-os/reboot_required") == "OFF", 10))
+
+    # Install, held part way so we can look at it while it runs
+    h = jr(OH); h["hold"] = True; h["reboot_after"] = True; h["calls"] = []; jw(OH, h)
+    ctl.publish("box/host-os/packages/install", "install")
+    check("O5 install starts: in progress", wait(lambda: ost().get("in_progress") is True), ost())
+    check("O5 apt runs: finish dpkg, update, upgrade (keeps config files, no needrestart restarts)",
+          wait(lambda: any("upgrade" in c for c in ocalls())), ocalls())
+    up = next((c for c in ocalls() if "upgrade" in c), [])
+    check("O5 upgrade command is fixed", up[:2] == ["apt-get", "-y"] and "Dpkg::Options::=--force-confold" in up
+          and "--with-new-pkgs" in up and "NEEDRESTART_MODE=l" in up, up)
+    check("O5 dpkg --configure -a and apt-get update ran first",
+          [c[0:2] for c in ocalls()][:2] == [["dpkg", "--force-confdef"], ["apt-get", "update"]], ocalls()[:3])
+    n0 = sum("upgrade" in c for c in ocalls())
+    ctl.publish("box/host-os/packages/install", "install")
+    ctl.publish("box/bridge-update/install", "INSTALL")
+    check("O5 the bridge update waits for it", wait(lambda: "OS package updates" in
+          ((last("box/bridge-update/attributes", js=True) or {}).get("last_install_result") or "")),
+          last("box/bridge-update/attributes"))
+    time.sleep(1)
+    check("O5 a second Install press does nothing", sum("upgrade" in c for c in ocalls()) == n0)
+    h = jr(OH); h["hold"] = False; jw(OH, h)
+    check("O6 finished: up to date", wait(lambda: ost().get("in_progress") is False
+                                          and ost().get("latest_version") == "Debian 12.8", 20), ost())
+    check("O6 result says what happened and that a reboot is needed",
+          oat().get("last_install_status") == "updated" and oat().get("last_install_result")
+          == "Installed 3 package updates; a reboot is needed to finish", oat())
+    check("O6 reboot required from the update", wait(lambda: last("box/host-os/reboot_required") == "ON", 10))
+    os.remove(f"{O}/reboot-required")
+
+    # A failing install
+    h = jr(OH); h["pending"] = PKGS[:1]; h["upgrade_rc"] = 100; h["reboot_after"] = False; jw(OH, h)
+    ctl.publish("box/check", "CHECK")
+    check("O7 Check for updates refreshes", wait(lambda: ost().get("latest_version") == "1 update"), ost())
+    ctl.publish("box/host-os/packages/install", "install")
+    check("O7 failure reported with a hint and the log tail",
+          wait(lambda: oat().get("last_install_status") == "failed", 20)
+          and "apt was busy" in oat().get("last_install_result", "") and "Could not get lock" in (oat().get("log_tail") or ""), oat())
+    check("O7 the update is still offered", ost().get("latest_version") == "1 update" and ost().get("in_progress") is False)
+
+    # Interrupted dpkg: offered as an update, Install finishes it
+    h = jr(OH); h["pending"] = []; h["upgrade_rc"] = 0; h["audit"] = "The following packages are only half configured"; jw(OH, h)
+    ctl.publish("box/check", "CHECK")
+    check("O8 an interrupted install is offered", wait(lambda: ost().get("latest_version") == "Finish interrupted install"), ost())
+    ctl.publish("box/host-os/packages/install", "install")
+    check("O8 Install finishes it", wait(lambda: ost().get("latest_version") == "Debian 12.8"
+                                         and oat().get("dpkg_interrupted") is False, 20), (ost(), oat()))
+
+    # Docker in the list
+    h = jr(OH); h["pending"] = [["containerd.io", "1.7.0-1", "1.7.1-1", "Docker:bookworm/stable"]]; jw(OH, h)
+    ctl.publish("box/check", "CHECK")
+    check("O9 Docker updates are called out", wait(lambda: "every container restarts" in ost().get("release_summary", ""))
+          and oat().get("restarts_docker") is True, ost())
+
+    # Retained or odd commands never install
+    stop(ob)
+    h = jr(OH); h["calls"] = []; jw(OH, h)
+    ctl.publish("box/host-os/packages/install", "install", retain=True).wait_for_publish()
+    ob = run_bridge("box", OCFG, OLOG)
+    check("O10 back online", wait(lambda: last("box/availability") == "online"))
+    check("O10 retained install command cleared", wait(lambda: last("box/host-os/packages/install") == ""))
+    ctl.publish("box/host-os/packages/install", "rm -rf /")
+    time.sleep(2)
+    check("O10 nothing installed", not any("upgrade" in c and "-s" not in c for c in ocalls()), ocalls())
+
+    # In a container the kernel is the host's: no kernel check
+    stop(ob)
+    ocfg["os"]["container"] = True; ocfg["os"]["disk_warn_percent"] = 0
+    jw(OCFG, ocfg)
+    os.makedirs(f"{O}/modules/6.1.0-29-amd64")
+    ob = run_bridge("box", OCFG, OLOG)
+    check("O11 container: newer kernel ignored", wait(lambda: (last("box/host-os/reboot_required/attributes", js=True) or {})
+                                                       .get("container") is True) and last("box/host-os/reboot_required") == "OFF")
+    check("O11 disk at or over the warning level", wait(lambda: last("box/host-os/disk_almost_full") == "ON"))
+    rc, out = check_discovery("box", OCFG)
+    check("O12 --check-discovery: nothing lost", rc == 0, out)
+    stop(ob)
+    nocfg = dict(ocfg, os=False)
+    jw(f"{O}/off.json", nocfg)
+    r = subprocess.run([sys.executable, "-I", BRIDGE, "--name", "box", "--config", f"{O}/off.json", "--self-test"],
+                       capture_output=True, text=True, timeout=60)
+    check("O12 \"os\": false turns it off", r.returncode == 0 and "plugins selfupdate" in r.stdout
+          and "os" not in r.stdout.split("plugins", 1)[1], r.stdout + r.stderr)
+
     # ============================================================ Anthias (a Pi)
     print("A. Anthias plugin on a Pi that is often switched off")
     PI = f"{T}/pi"
@@ -520,7 +703,11 @@ elif a[0] == "restart": print(a[1])
             "anthias": {"url": f"{API}/anth", "username": "admin", "password": "secret", "poll_seconds": 1,
                         "github_api": f"{API}/gh-anthias", "vcgencmd": f"{PBIN}/vcgencmd",
                         "systemctl": f"{PBIN}/systemctl", "uptime_file": f"{PI}/uptime",
-                        "boot_id_file": f"{PI}/boot_id", "thermal_file": f"{PI}/temp", "model_file": f"{PI}/model"}}
+                        "boot_id_file": f"{PI}/boot_id", "thermal_file": f"{PI}/temp", "model_file": f"{PI}/model"},
+            "os": {"path": OBIN, "first_check_seconds": 0.5, "poll_minutes": 0.02, "container": False,
+                   "reboot_required_file": f"{PI}/reboot-required", "modules_dir": f"{O}/modules",
+                   "os_release": f"{O}/os-release", "debian_version": f"{O}/debian_version",
+                   "kernel_release": "6.1.0-29-amd64"}}
     jw(PCFG, pcfg)
     PLOG = f"{PI}/log"
     PENV = {"PI_HA_DOCKER": f"{PBIN}/docker"}
@@ -544,6 +731,9 @@ elif a[0] == "restart": print(a[1])
           and sd.get("command_topic") == "pi/cmd/shutdown", sd)
     check("A1 CPU temperature only while up", (disc("sensor", "pi_ha", "cpu_temperature") or {})
           .get("availability_topic") == "pi/availability")
+    po = disc("update", "pi_ha", "os_packages") or {}
+    check("A1 OS entities keep their last value while off", po and "availability_topic" not in po
+          and "availability_topic" not in (disc("sensor", "pi_ha", "disk_used") or {"availability_topic": 1}), po)
 
     check("A2 online", wait(lambda: last("pi/availability") == "online"))
     check("A2 CPU temperature", wait(lambda: last("pi/cpu_temperature") == "48.3"), last("pi/cpu_temperature"))
@@ -609,6 +799,25 @@ elif a[0] == "restart": print(a[1])
     # Power cut: no clean stop, the broker's last will has to say it
     pb.kill(); pb.wait()
     check("A9 Online turns off after a power cut (last will)", wait(lambda: last("pi/availability") == "offline", 15))
+
+    # Shut down while OS updates install: it waits for them, then powers off
+    h = jr(OH); h["pending"] = PKGS; h["hold"] = True; h["upgrade_rc"] = 0; jw(OH, h)
+    hp = jr(PH); hp["calls"] = []; jw(PH, hp)
+    pb = run_bridge("pi", PCFG, PLOG, **PENV)
+    check("A10 OS updates found on the Pi", wait(lambda: (last("pi/host-os/packages/state", js=True) or {})
+                                                .get("latest_version") == "3 updates"), last("pi/host-os/packages/state"))
+    ctl.publish("pi/host-os/packages/install", "install")
+    check("A10 installing", wait(lambda: (last("pi/host-os/packages/state", js=True) or {}).get("in_progress") is True))
+    ctl.publish("pi/cmd/shutdown", "PRESS")
+    check("A10 Shut down waits for the install", wait(lambda: last("pi/last_action") == "Shut down: waiting for OS package updates"),
+          last("pi/last_action"))
+    time.sleep(2)
+    check("A10 not powered off yet", ["systemctl", "poweroff"] not in jr(PH)["calls"])
+    h = jr(OH); h["hold"] = False; jw(OH, h)
+    check("A10 powers off once the install is done", wait(lambda: ["systemctl", "poweroff"] in jr(PH)["calls"], 20))
+    check("A10 the install finished first", (last("pi/host-os/packages/attributes", js=True) or {})
+          .get("last_install_status") == "updated", last("pi/host-os/packages/attributes"))
+    stop(pb)
 finally:
     for p in procs:
         p.terminate()

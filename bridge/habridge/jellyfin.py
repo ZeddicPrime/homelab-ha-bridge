@@ -36,7 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import VERSION
+from . import VERSION, util
 from .core import Plugin
 from .util import now_iso
 
@@ -505,7 +505,8 @@ class JellyfinPlugin(Plugin):
             self.installing = True
         try:
             self.pub(self.t_controls, "offline")
-            self.run_update()
+            with util.APT_LOCK:  # the updater runs apt
+                self.run_update()
         finally:
             with self.lock:
                 self.installing = False
@@ -588,13 +589,21 @@ class JellyfinPlugin(Plugin):
             if self.apt_running:
                 return
             self.apt_running = True
+        if not util.APT_LOCK.acquire(timeout=600):  # the OS plugin may be running apt
+            with self.lock:
+                self.apt_running = False
+            log.info("Update check skipped: apt busy")
+            return
         try:
-            if refresh:
-                rc, out, err = run(["apt-get", "update", "-qq"], timeout=300, env_path=self.env_path)
-                if rc != 0:
-                    log.warning("apt-get update failed: %s", (err or out).strip()[-300:])
-            self.last_apt = time.time()
-            inst, cand, pk = self.installed_version(), self.candidate_version(), self.os_upgradable()
+            try:
+                if refresh:
+                    rc, out, err = run(["apt-get", "update", "-qq"], timeout=300, env_path=self.env_path)
+                    if rc != 0:
+                        log.warning("apt-get update failed: %s", (err or out).strip()[-300:])
+                self.last_apt = time.time()
+                inst, cand, pk = self.installed_version(), self.candidate_version(), self.os_upgradable()
+            finally:
+                util.APT_LOCK.release()
             with self.lock:
                 self.state["last_check"] = now_iso()
                 self.state["installed_raw"] = inst

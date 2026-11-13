@@ -25,6 +25,10 @@ One device per host (`<name>` is the host name you give the installer, e.g. `med
 | `binary_sensor.<name>_<key>_connected` | Cloudflare Tunnel connectors only: edge connections from cloudflared's `/ready` |
 | `button.<name>_check_for_updates` | Check everything now |
 | `update.<name>_ha_bridge` | This bridge: installed vs. the newest release here |
+| `update.<name>_os_packages` | Pending apt package updates (installed: the release, e.g. Debian 12.8; latest: "N updates"). Install runs a fixed `apt-get --with-new-pkgs upgrade`. Hosts with apt only |
+| `binary_sensor.<name>_reboot_required` | The system asked for a reboot, or (outside a container) a newer kernel is installed |
+| `sensor.<name>_disk_used` | Percent used of `/` (and of any other `os.disk_paths`) |
+| `binary_sensor.<name>_disk_almost_full` | A disk at or above `os.disk_warn_percent` (90) |
 
 `<key>` is the Compose folder name under the compose root (`/opt/<name>/<folder>/`), or
 `<folder>_<service>` for a folder with several services. A folder named like the host
@@ -46,12 +50,26 @@ install uses it: anything that varies is found at runtime or set in the host's c
 | `jellyfin` | Jellyfin installed as a package | server, streams and transcodes, library counts and scan, restart, GPU load, OS updates, and an update entity that runs the host's update command (e.g. a community script's `update`) |
 | `foundry` | Foundry VTT | a "Foundry VTT" device: server, world, players, logins (event), backups, core / game-system / module updates (optional module groups), launch world and return to setup |
 | `anthias` | Anthias on a Raspberry Pi | online, health (undervoltage, storage, CEC, Anthias web), CPU temperature, projector standby/wake, next clip, restart viewer, reboot, shut down, and a read-only Anthias update entity |
+| `os` | every host, unless the config says `"os": false` | OS packages (update entity with Install), reboot required, disk used, disk almost full |
 | `selfupdate` | every host | the "Bridge" update entity |
+
+### OS package updates
+
+Install finishes an interrupted dpkg run, runs `apt-get update`, then
+`apt-get -y --with-new-pkgs upgrade` with `--force-confdef --force-confold`: it never removes
+packages, keeps your edited config files, waits for apt locks, and tells needrestart to list
+rather than restart services. apt runs in its own session, so a restart of the bridge doesn't
+stop it. The update's summary lists the packages, says how many are security updates, and warns
+when Docker itself is among them (every container restarts). Nothing installs on its own.
+
+Only one install runs on a host at a time: OS packages, a container update or a bridge update
+started while another is running is refused and says why. On a Pi, Shut down and Reboot wait
+for a running install to finish (up to `anthias.busy_wait_minutes`, 45) and then go ahead.
 
 ### Hosts that are switched off
 
 A Pi on the same smart plug as its display is off most of the time. The `anthias` plugin
-keeps health and history (and the Anthias update) at their last value while it's off, and
+keeps health and history (and the Anthias update, and the `os` plugin's entities) at their last value while it's off, and
 shows **Online** off; only live values and buttons go unavailable. Shut down powers the Pi
 off cleanly before the plug is cut. Set `mqtt.keepalive` to 15 or so, so that a Pi that
 loses power without shutting down shows offline within about 20 seconds.
@@ -145,6 +163,7 @@ python3 -I homelab-ha-bridge-$VER/bridge/bridge.py --name media --check-discover
 | `groups` | `{}` | `{"app": {"title": "...", "members": ["server", "worker"], "health_of": "server", "compose_check_url": ".../{version}/docker-compose.yml"}}` |
 | `db_dump` | none | For groups: `{"container": "...", "user": "postgres", "dir": "...", "keep": 3}` |
 | `plugins` | `["compose"]` | See Plugins; each plugin's own settings go in a section named after it (`immich`, `jellyfin`, `foundry`, `anthias`), described at the top of its module in `bridge/habridge/` |
+| `os` | on | `false` to turn the OS plugin off; or `{"check_hours": 6, "disk_paths": ["/"], "disk_warn_percent": 90, "timeout_minutes": 60}` |
 | `self_update` | on | `{"enabled": false}` to turn it off; `check_interval_hours` |
 
 ## Development

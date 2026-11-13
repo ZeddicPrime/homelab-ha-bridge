@@ -515,6 +515,18 @@ class ComposePlugin(Plugin):
         key, kind = m.group(1), m.group(2)
         action = {"install": "install", "restart": "restart",
                   "power/set": "start" if payload == ON else "stop"}[kind]
+        if action == "install" and (key in self.groups or key in self.projects):
+            # Another plugin's install (OS packages can restart Docker itself) comes first.
+            other = next((p.busy_reason() for p in self.b.plugins if p is not self and p.busy_reason()), None)
+            if other:
+                log.info("%s: install not started: %s is running", key, other)
+                with self.lock:
+                    r = self.results.setdefault(key, {})
+                    r["last_install"] = now_iso()
+                    r["last_install_result"] = f"Not started: {other} is running; try again when it's done"
+                self.save()
+                self.publish_project(key)
+                return True
         if key in self.groups:
             with self.lock:
                 members = self.groups[key].get("members", [])

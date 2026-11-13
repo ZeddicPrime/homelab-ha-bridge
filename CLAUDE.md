@@ -68,8 +68,10 @@ behaviour gets a scenario in the matching e2e suite.
   only, runs before every start), `habridge/` (the package), `systemd/`, `apt-packages.txt`.
 - `habridge/core.py`: MQTT connection, device, availability, Check button, safety rules, state.
 - Plugins (`habridge/compose.py`, `immich.py`, `jellyfin.py`, `foundry.py`, `anthias.py`,
-  `selfupdate.py`) subclass `core.Plugin`. A new host type is a new plugin, enabled per host with
-  the config `plugins` list. A plugin's `prepare()` finds what the host has without publishing
+  `hostos.py` (the `os` plugin), `selfupdate.py`) subclass `core.Plugin`. A new host type is a new
+  plugin, enabled per host with the config `plugins` list (`os` and `selfupdate` are on everywhere).
+  Anything that runs apt takes `util.APT_LOCK`; an install refuses to start while another plugin's
+  `busy_reason()` is set. A plugin's `prepare()` finds what the host has without publishing
   (so `--check-discovery` sees every entity), and `busy_reason()` says when a restart or
   power-off would cut something short.
 - Some hosts lose power without warning (a Pi on a smart plug). Anything written that must

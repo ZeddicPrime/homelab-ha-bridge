@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bridge"))
 
 from habridge.compose import compose_changes, metrics_address  # noqa: E402
+from habridge.hostos import disk_usage, failure_hint, kernel_reboot_reason, os_label, parse_simulation  # noqa: E402
 from habridge.registry import parse_ref  # noqa: E402
 from habridge.util import is_prerelease, label_version, release_url, slug, version_tuple  # noqa: E402
 
@@ -165,6 +166,72 @@ class Busy(unittest.TestCase):
         b.plugins = [P(None)]
         self.assertIsNone(b.busy_reason())
 
+
+
+SIM = """NOTE: This is only a simulation!
+Reading package lists...
+The following packages have been kept back:
+  linux-image-amd64 somepkg
+The following packages will be upgraded:
+  libssl3 openssl tzdata
+Inst libssl3 [3.0.14-1~deb12u2] (3.0.15-1~deb12u1 Debian-Security:12/stable-security [amd64])
+Inst openssl [3.0.14-1~deb12u2] (3.0.15-1~deb12u1 Debian-Security:12/stable-security [amd64])
+Inst tzdata [2024a-0+deb12u1] (2024b-0+deb12u1 Debian:12.8/stable [all])
+Inst newdep (1.0-1 Debian:12.8/stable [amd64])
+Conf libssl3 (3.0.15-1~deb12u1 Debian-Security:12/stable-security [amd64])
+"""
+
+
+class HostOS(unittest.TestCase):
+    def test_parse_simulation(self):
+        pkgs, kept = parse_simulation(SIM)
+        self.assertEqual([p["name"] for p in pkgs], ["libssl3", "openssl", "tzdata", "newdep"])
+        self.assertEqual([p["security"] for p in pkgs], [True, True, False, False])
+        self.assertEqual(pkgs[0]["from"], "3.0.14-1~deb12u2")
+        self.assertEqual(pkgs[0]["to"], "3.0.15-1~deb12u1")
+        self.assertIsNone(pkgs[3]["from"])
+        self.assertEqual(kept, ["linux-image-amd64", "somepkg"])
+        self.assertEqual(parse_simulation(""), ([], []))
+
+    def test_os_label(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        osr, dv = os.path.join(d, "os-release"), os.path.join(d, "debian_version")
+        with open(osr, "w") as f:
+            f.write('PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nNAME="Debian GNU/Linux"\nVERSION_ID="12"\nID=debian\n')
+        with open(dv, "w") as f:
+            f.write("12.8\n")
+        self.assertEqual(os_label(osr, dv), "Debian 12.8")
+        with open(dv, "w") as f:
+            f.write("trixie/sid\n")
+        self.assertEqual(os_label(osr, dv), "Debian GNU/Linux 12")
+        with open(osr, "w") as f:
+            f.write('NAME="Ubuntu"\nVERSION="24.04.1 LTS (Noble Numbat)"\nID=ubuntu\nVERSION_ID="24.04"\n')
+        self.assertEqual(os_label(osr, dv), "Ubuntu 24.04.1")
+        self.assertIsNone(os_label(os.path.join(d, "missing"), dv))
+
+    def test_kernel_reboot_reason(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        for k in ("6.1.0-27-amd64", "6.6.51+rpt-rpi-v8", "6.6.51+rpt-rpi-2712"):
+            os.makedirs(os.path.join(d, k))
+        self.assertIsNone(kernel_reboot_reason("6.1.0-27-amd64", d))
+        self.assertIsNone(kernel_reboot_reason("6.6.51+rpt-rpi-2712", d))
+        os.makedirs(os.path.join(d, "6.1.0-28-amd64"))
+        self.assertIn("6.1.0-28-amd64", kernel_reboot_reason("6.1.0-27-amd64", d))
+        os.makedirs(os.path.join(d, "6.6.62+rpt-rpi-2712"))
+        self.assertIn("6.6.62+rpt-rpi-2712", kernel_reboot_reason("6.6.51+rpt-rpi-2712", d))
+        self.assertIsNone(kernel_reboot_reason("6.6.51+rpt-rpi-v8", d))  # other flavour unchanged
+        self.assertIn("no longer installed", kernel_reboot_reason("6.1.0-26-amd64", d))
+        self.assertIsNone(kernel_reboot_reason("6.1.0-27-amd64", os.path.join(d, "missing")))
+
+    def test_disk_usage_and_hints(self):
+        pct, used, total, free = disk_usage("/")
+        self.assertTrue(0 <= pct <= 100 and total > 0)
+        self.assertIsNone(disk_usage("/no/such/path"))
+        self.assertIn("busy", failure_hint("E: Could not get lock /var/lib/dpkg/lock-frontend"))
+        self.assertIn("interrupted", failure_hint("E: dpkg was interrupted, you must manually run"))
+        self.assertIsNone(failure_hint("all fine"))
 
 if __name__ == "__main__":
     unittest.main()

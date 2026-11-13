@@ -20,14 +20,22 @@ def available_plugins():
     from .foundry import FoundryPlugin
     from .immich import ImmichPlugin
     from .jellyfin import JellyfinPlugin
+    from .hostos import HostOSPlugin
     from .selfupdate import SelfUpdatePlugin
     return {"compose": ComposePlugin, "immich": ImmichPlugin, "jellyfin": JellyfinPlugin,
-            "foundry": FoundryPlugin, "anthias": AnthiasPlugin, "selfupdate": SelfUpdatePlugin}
+            "foundry": FoundryPlugin, "anthias": AnthiasPlugin, "os": HostOSPlugin,
+            "selfupdate": SelfUpdatePlugin}
+
+
+def os_enabled(cfg):
+    o = cfg.get("os", True)
+    return o is not False and not (isinstance(o, dict) and o.get("enabled") is False)
 
 
 def build_plugins(bridge, cfg):
     """Plugins come from config "plugins"; without it: compose, plus immich,
-    jellyfin, foundry or anthias when the config has that section, and selfupdate."""
+    jellyfin, foundry or anthias when the config has that section. os is added
+    on every host unless the config says "os": false; selfupdate always, last."""
     available = available_plugins()
     names = cfg.get("plugins")
     if names is None:
@@ -37,7 +45,10 @@ def build_plugins(bridge, cfg):
         for app in ("jellyfin", "foundry", "anthias"):
             if cfg.get(app):
                 names.append(app)
-    names = [n for n in names if n != "selfupdate"] + ["selfupdate"]  # always last, always present
+    names = [n for n in names if n not in ("os", "selfupdate")]
+    if os_enabled(cfg):
+        names.append("os")
+    names.append("selfupdate")  # always last, always present
     unknown = [n for n in names if n not in available]
     if unknown:
         raise SystemExit(f"Unknown plugin(s) in config: {', '.join(unknown)}")

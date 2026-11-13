@@ -3,6 +3,21 @@
 Bridges show the section for a release as its release notes in Home Assistant, so the
 first lines of each section should say what changes for someone pressing Install.
 
+## 0.3.0
+
+OS updates from Home Assistant. Every host gets four new entities; nothing existing changes.
+
+- **OS packages** (update entity): pending apt updates, with how many are security updates.
+  Install runs a fixed `apt-get --with-new-pkgs upgrade`: no package removals, your edited
+  config files are kept, and an interrupted earlier install is finished first. It warns when
+  Docker itself is in the list (every container restarts). Nothing installs on its own.
+- **Reboot required**: the system asked for one, or a newer kernel is installed (outside containers).
+- **Disk used** and **Disk almost full** (90% by default).
+- **One install at a time per host**: OS packages, container updates and bridge updates
+  refuse to start while another is running, and say why.
+- **Pis**: Shut down and Reboot wait for a running install to finish, then go ahead.
+- `"os": false` in a host's config turns the new entities off.
+
 ## 0.2.0
 
 New plugins for hosts that aren't plain Docker Compose hosts, and a bridge update that is

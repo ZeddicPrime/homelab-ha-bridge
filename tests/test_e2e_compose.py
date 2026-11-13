@@ -440,6 +440,43 @@ press("immich/check", "CHECK")
 check("compose updated locally -> OK", wait(lambda: app_attr().get("compose_check") == "OK" and not app_attr().get("compose_changed")),
       app_attr())
 
+print("O. an OS package install comes first: container updates wait for it")
+OB = f"{T}/osbin"
+os.makedirs(OB)
+HOLD = f"{T}/os-hold"
+open(HOLD, "w").close()
+for cmd, body in {
+    "apt-get": f"""
+import os, sys, time
+a = sys.argv[1:]
+if "-s" in a: print("Inst libfoo [1.0] (1.1 Debian:12/stable [amd64])"); sys.exit(0)
+if "upgrade" in a:
+    while os.path.exists({HOLD!r}): time.sleep(0.2)
+sys.exit(0)
+""",
+    "dpkg": "import sys\nsys.exit(0)\n",
+}.items():
+    with open(f"{OB}/{cmd}", "w") as f:
+        f.write(f"#!{sys.executable}\n" + body)
+    os.chmod(f"{OB}/{cmd}", 0o755)
+bridge.terminate(); bridge.wait()
+cfg = json.load(open(f"{T}/config.json"))
+cfg["os"] = {"path": OB, "first_check_seconds": 0.5, "container": True}
+jw(f"{T}/config.json", cfg)
+start_bridge()
+check("os: update offered", wait(lambda: (last("immich/host-os/packages/state", js=True) or {}).get("latest_version") == "1 update"),
+      last("immich/host-os/packages/state"))
+press("immich/host-os/packages/install", "install")
+check("os: installing", wait(lambda: (last("immich/host-os/packages/state", js=True) or {}).get("in_progress") is True))
+n_dump = open(os.environ["FAKE_DOCKER_LOG"]).read().count("pg_dumpall")
+press("immich/app/install", "INSTALL")
+check("container update not started, and says why",
+      wait(lambda: (app_attr().get("last_install_result") or "").startswith("Not started: OS package updates is running")),
+      app_attr().get("last_install_result"))
+check("nothing ran for it", open(os.environ["FAKE_DOCKER_LOG"]).read().count("pg_dumpall") == n_dump)
+os.remove(HOLD)
+check("os install finishes", wait(lambda: (last("immich/host-os/packages/state", js=True) or {}).get("in_progress") is False, 20))
+
 print("K. HA schema")
 with lock:
     allm = list(msgs)

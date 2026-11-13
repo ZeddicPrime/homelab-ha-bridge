@@ -5,11 +5,15 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import urllib.parse
 from datetime import datetime, timezone
 
 # Set once at startup by bridge.py from <NAME>_HA_DOCKER (tests point it at a shim).
 DOCKER = "docker"
+
+# One apt run at a time within a bridge (the OS and Jellyfin plugins both use apt).
+APT_LOCK = threading.RLock()  # re-entrant: an install re-checks afterwards
 
 
 def now_iso():
