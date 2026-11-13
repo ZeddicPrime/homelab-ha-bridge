@@ -3,6 +3,15 @@
 Bridges show the section for a release as its release notes in Home Assistant, so the
 first lines of each section should say what changes for someone pressing Install.
 
+## 0.3.2
+
+Small fixes to OS packages; nothing else changes.
+
+- The notes keep the "Includes Docker" warning however long the package list is (the list
+  is shortened instead).
+- The installed version follows a point release (e.g. Debian 13.1 → 13.7) after an install,
+  without restarting the bridge.
+
 ## 0.3.1
 
 Fixes a lock-up: a bridge could stop updating Home Assistant (and not stop cleanly)

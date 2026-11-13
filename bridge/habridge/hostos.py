@@ -47,6 +47,7 @@ log = logging.getLogger("habridge.os")
 
 SYS_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 INSTALL = "install"
+SUMMARY_MAX = 250  # Home Assistant caps release_summary at 255 characters
 # Packages whose upgrade restarts the Docker daemon, and with it every container.
 DOCKER_PACKAGES = {"docker-ce", "docker.io", "containerd.io", "containerd", "docker-engine", "moby-engine"}
 APT_OPTS = ["-o", "DPkg::Lock::Timeout=300", "-o", "Dpkg::Options::=--force-confdef",
@@ -367,16 +368,25 @@ class HostOSPlugin(Plugin):
         summary = ""
         if n:
             sec = sum(1 for p in pkgs if p.get("security"))
-            summary = f"{n} package update{'s' if n != 1 else ''}"
-            if sec:
-                summary += f" ({sec} security)"
-            summary += ": " + ", ".join(names[:12]) + (f" and {n - 12} more" if n > 12 else "") + "."
-            if docker:
-                summary += " Includes Docker: every container restarts during the install."
-        if interrupted:
-            summary = ("An earlier package install was interrupted; Install finishes it. " + summary).strip()
+            head = f"{n} package update{'s' if n != 1 else ''}" + (f" ({sec} security)" if sec else "") + ": "
+            tail = " Includes Docker: every container restarts during the install." if docker else ""
+            if interrupted:
+                head = "An earlier package install was interrupted; Install finishes it. " + head
+            # The warnings must survive the length limit; the package list gives way.
+            room = SUMMARY_MAX - len(head) - len(tail)
+            shown = len(names)
+            while shown > 0:
+                listed = ", ".join(names[:shown]) + (f" and {n - shown} more" if shown < n else "") + "."
+                if len(listed) <= room:
+                    break
+                shown -= 1
+            if shown == 0:
+                listed = f"{n} packages."
+            summary = head + listed + tail
+        elif interrupted:
+            summary = "An earlier package install was interrupted; Install finishes it."
         state = {"installed_version": installed, "latest_version": latest, "title": "OS packages",
-                 "release_summary": summary[:250], "in_progress": installing}
+                 "release_summary": summary[:SUMMARY_MAX], "in_progress": installing}
         if not st.get("last_check"):
             state.pop("latest_version")  # not checked yet: don't claim "up to date"
         self.pub(self.t_state, state)
@@ -446,6 +456,7 @@ class HostOSPlugin(Plugin):
             rc, out, e = run(["apt-get", "-s", "-o", "Debug::NoLocking=1", "--with-new-pkgs", "upgrade"],
                              timeout=300, env_path=self.env_path)
             arc, aout, _ = run(["dpkg", "--audit"], timeout=60, env_path=self.env_path)
+            self.label = os_label(self.os_release, self.debian_version) or self.label  # a point release changes it
             with self.lock:
                 if rc == 0:
                     pkgs, kept = parse_simulation(out)

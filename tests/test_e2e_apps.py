@@ -620,11 +620,18 @@ sys.exit(1)
     check("O8 Install finishes it", wait(lambda: ost().get("latest_version") == "Debian 12.8"
                                          and oat().get("dpkg_interrupted") is False, 20), (ost(), oat()))
 
-    # Docker in the list
-    h = jr(OH); h["pending"] = [["containerd.io", "1.7.0-1", "1.7.1-1", "Docker:bookworm/stable"]]; jw(OH, h)
+    # Docker in a long list: the warning survives the length limit, the list gives way
+    many = [[f"library-package-number-{i:02d}", "1.0-1", "1.1-1", "Debian:12/stable"] for i in range(30)]
+    h = jr(OH); h["pending"] = many + [["containerd.io", "1.7.0-1", "1.7.1-1", "Docker:bookworm/stable"]]; jw(OH, h)
     ctl.publish("box/check", "CHECK")
-    check("O9 Docker updates are called out", wait(lambda: "every container restarts" in ost().get("release_summary", ""))
-          and oat().get("restarts_docker") is True, ost())
+    check("O9 Docker updates are called out, even in a long list",
+          wait(lambda: ost().get("release_summary", "").endswith("Includes Docker: every container restarts during the install."))
+          and oat().get("restarts_docker") is True and len(ost()["release_summary"]) <= 250
+          and "more." in ost()["release_summary"], ost())
+    # A point release (base-files) changes the installed version shown
+    open(f"{O}/debian_version", "w").write("12.9\n")
+    ctl.publish("box/check", "CHECK")
+    check("O9 installed version follows a point release", wait(lambda: ost().get("installed_version") == "Debian 12.9"), ost())
 
     # Retained or odd commands never install
     stop(ob)
