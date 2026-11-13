@@ -2,7 +2,7 @@
 mosquitto, fake application servers (fakes/fake_apps.py) and fake host commands
 (systemctl, dpkg-query, apt, dpkg, nvidia-smi, an update command) written into a temp
 folder. Also covers --check-discovery and the "don't restart during an install" rule."""
-import json, os, shutil, subprocess, sys, tempfile, textwrap, threading, time
+import json, os, re, shutil, subprocess, sys, tempfile, textwrap, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -550,7 +550,7 @@ sys.exit(1)
     check("O1 update entity: IDs, install command, availability", u.get("unique_id") == "box_ha_os_packages"
           and u.get("default_entity_id") == "update.box_os_packages" and u.get("command_topic") == "box/host-os/packages/install"
           and u.get("payload_install") == "install" and u.get("availability_topic") == "box/availability", u)
-    slugO = O.strip("/").replace("/", "_").replace("-", "_").lower()
+    slugO = re.sub(r"[^a-z0-9]+", "_", O.lower()).strip("_")  # same rule as util.slug
     check("O1 reboot, disk and disk-full entities",
           (disc("binary_sensor", "box_ha", "reboot_required") or {}).get("device_class") == "problem"
           and (disc("sensor", "box_ha", "disk_used") or {}).get("unit_of_measurement") == "%"

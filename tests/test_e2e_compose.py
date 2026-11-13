@@ -223,8 +223,8 @@ press("immich/check", "CHECK")
 check("shown as rebuilt", wait(lambda: app().get("latest_version") == "v3.3.6 (rebuilt)"), app())
 press("immich/app/install", "INSTALL")
 check("rebuild installed", wait(lambda: app().get("latest_version") == "v3.3.6" and not app().get("in_progress"), 30), app())
-check("rebuild result text", app_attr().get("last_install_result") == "Installed rebuilt v3.3.6 images",
-      app_attr().get("last_install_result"))
+check("rebuild result text", wait(lambda: app_attr().get("last_install_result") == "Installed rebuilt v3.3.6 images", 5),
+      app_attr().get("last_install_result"))  # state and attributes are separate messages
 
 print("E. release that changes docker-compose.yml")
 for repo, tag in (("test/immich-server", "release"), ("test/immich-ml", "release")):
