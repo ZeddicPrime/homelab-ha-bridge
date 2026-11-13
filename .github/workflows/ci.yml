@@ -34,3 +34,10 @@ jobs:
         run: /usr/bin/python3 tests/test_e2e_compose.py
       - name: Application plugins end to end
         run: /usr/bin/python3 tests/test_e2e_apps.py
+      - name: Bridge logs (on failure)
+        if: failure()
+        run: |
+          for f in /tmp/imha-e2e-*/bridge.out /tmp/habridge-*/*.out /tmp/habridge-*/*/log/*.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"; tail -n 150 "$f"; echo "::endgroup::"
+          done
